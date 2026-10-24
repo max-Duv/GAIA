@@ -46,6 +46,9 @@ GAIA/
 ├── T3/                                Thrust 3: Closed-Loop Active Mitigation
 │   └── closed_loop_mitigator_v2.py      4-phase mitigation experiment with decomposition
 │
+├── scripts/
+│   └── jetson_cleanup.sh               Post-experiment Jetson wipe (repo, caches, history)
+│
 ├── gaia_master_suite_v2.py            Orchestrates T1 → T2 → T3 end-to-end
 ├── power_analysis_plotter.py          T1 post-hoc plotting (imported by master suite)
 └── README.md                          This file
@@ -346,7 +349,7 @@ Use this to confirm you have collected everything the proposal promises:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `RuntimeError: No hardware telemetry source available` | GPU not visible or drivers not loaded | Run `nvidia-smi` manually |
-| `RuntimeError: Cannot detect GPU compute capability` | `nvidia-smi` not on PATH | Ensure CUDA driver is installed |
+| `RuntimeError: Cannot detect GPU compute capability` | `nvidia-smi` not on PATH or hangs on Jetson | The script tries `nvidia-smi` (5s timeout) then falls back to `torch.cuda.get_device_capability()`. Ensure either the CUDA driver or PyTorch CUDA is installed |
 | `RuntimeError: nvcc compilation failed` | CUDA toolkit version mismatch | Check `nvcc --version` matches driver |
 | `RuntimeError: PyTorch CUDA is not available` | PyTorch CPU-only wheel | Reinstall: `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
 | `RuntimeError: pynvml not available` | Missing package | `pip install nvidia-ml-py` |
