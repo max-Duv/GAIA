@@ -21,11 +21,14 @@ def plot_power_characterization(df, output_png_path="power_sag_analysis.png", td
     v = df['voltage_v'].values
     dI = df['di_dt_amps_per_sec'].values / 1e6 # Convert to A/us
 
-    # Derive the adversarial burst window from the CSV's own is_attack column
-    # (real hardware trials run the attack for the whole capture window, unlike
-    # the synthetic fallback dataset which stages a 3.0-8.0s window inside a
-    # longer idle baseline).
-    if 'is_attack' in df.columns and df['is_attack'].sum() > 0:
+    if 'phase' in df.columns:
+        attack_mask = df['phase'].str.contains('pulsed|stress|oversubscribe', case=False, na=False)
+        if attack_mask.any():
+            attack_t = t[attack_mask.values]
+            attack_start, attack_end = attack_t.min(), attack_t.max()
+        else:
+            attack_start, attack_end = t.min(), t.max()
+    elif 'is_attack' in df.columns and df['is_attack'].sum() > 0:
         attack_t = t[df['is_attack'].values.astype(bool)]
         attack_start, attack_end = attack_t.min(), attack_t.max()
     else:
@@ -60,8 +63,10 @@ def plot_power_characterization(df, output_png_path="power_sag_analysis.png", td
     axs[2].grid(True, linestyle=':', alpha=0.6)
     
     # Panel 4: Power Spectral Density (PSD / Frequency Analysis)
-    fs = 1.0 / (t[1] - t[0])
-    freqs, psd = signal.welch(p, fs=fs, nperseg=1024)
+    dt_mean = np.mean(np.diff(t))
+    fs = 1.0 / dt_mean if dt_mean > 0 else 20.0
+    nperseg = min(len(p), 1024)
+    freqs, psd = signal.welch(p, fs=fs, nperseg=nperseg)
     axs[3].semilogy(freqs, psd, color='#16a085', linewidth=1.2, label='Power Spectral Density (PSD)')
     axs[3].axvline(x=100.0, color='#e74c3c', linestyle='--', linewidth=1.5, label='Target Resonant Frequency ($f_0 = 100\\text{ Hz}$)')
     axs[3].set_xlim(0, 300)

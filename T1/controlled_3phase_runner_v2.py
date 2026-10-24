@@ -14,6 +14,8 @@ sys.path.insert(0, SCRIPT_DIR)
 
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2
 
+_EXE = ".exe" if sys.platform == "win32" else ""
+
 JETSON_ARCH = {
     "thor": "sm_110",
     "orin": "sm_87",
@@ -69,7 +71,7 @@ def compile_cuda_backend(src_path=None, out_binary=None, arch_override=None):
     if src_path is None:
         src_path = os.path.join(SCRIPT_DIR, "gpu_power_poc_v3.cu")
     if out_binary is None:
-        out_binary = os.path.join(SCRIPT_DIR, "gpu_power_poc_v3")
+        out_binary = os.path.join(SCRIPT_DIR, "gpu_power_poc_v3" + _EXE)
 
     if not os.path.exists(src_path):
         raise FileNotFoundError(f"CUDA source file not found: {src_path}")
@@ -237,7 +239,7 @@ def run_controlled_3phase_experiment(
     Produces per-sample CSV, per-trial summary CSV, and paired t-tests.
     """
     if cuda_binary is None:
-        cuda_binary = os.path.join(SCRIPT_DIR, "gpu_power_poc_v3")
+        cuda_binary = os.path.join(SCRIPT_DIR, "gpu_power_poc_v3" + _EXE)
     if output_csv is None:
         output_csv = os.path.join(SCRIPT_DIR, "controlled_3phase_experiment_v2.csv")
 

@@ -1,23 +1,26 @@
 import os
 import re
+import sys
 import time
 import glob
 import subprocess
 import threading
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXE = ".exe" if sys.platform == "win32" else ""
 
 
 def _cuda_subprocess_env():
     """Return an env dict for running compiled CUDA binaries.
-    Strips conda/pip CUDA libraries from LD_LIBRARY_PATH so the
+    On Linux, strips conda/pip CUDA libraries from LD_LIBRARY_PATH so the
     system's JetPack CUDA runtime is used instead of the desktop one."""
     env = os.environ.copy()
-    ld = env.get("LD_LIBRARY_PATH", "")
-    if ld:
-        cleaned = [p for p in ld.split(":")
-                   if "conda" not in p and "miniconda" not in p]
-        env["LD_LIBRARY_PATH"] = ":".join(cleaned)
+    if sys.platform != "win32":
+        ld = env.get("LD_LIBRARY_PATH", "")
+        if ld:
+            cleaned = [p for p in ld.split(":")
+                       if "conda" not in p and "miniconda" not in p]
+            env["LD_LIBRARY_PATH"] = ":".join(cleaned)
     return env
 
 try:
@@ -80,7 +83,7 @@ class GPUFaultAssessorV2:
                 self._jtop = None
                 print("[assessor] jtop failed")
 
-        self._victim_binary = os.path.join(SCRIPT_DIR, "gpu_victim_kernel")
+        self._victim_binary = os.path.join(SCRIPT_DIR, "gpu_victim_kernel" + _EXE)
         self._victim_compiled = os.path.exists(self._victim_binary)
 
     def _discover_jetson_ina3221_nodes(self):
@@ -295,7 +298,7 @@ class GPUFaultAssessorV2:
 
         arch = self._detect_gpu_arch()
         print(f"[victim] Compiling victim kernel ({arch})...")
-        cmd = ["nvcc", "-O3", f"-arch={arch}", src, "-o", self._victim_binary]
+        cmd = ["nvcc", "-O3", f"-arch={arch}", src, "-o", self._victim_binary, "-lcuda"]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"Victim kernel compilation failed:\n{res.stderr}")

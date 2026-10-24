@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.join(SCRIPT_DIR, "T1"))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "T2"))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "T3"))
 
+_EXE = ".exe" if sys.platform == "win32" else ""
+
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2
 from controlled_3phase_runner_v2 import run_controlled_3phase_experiment, compile_cuda_backend
 from gpu_defense_filters_v2 import PlatformAgnosticAnomalyDetector
@@ -22,7 +24,7 @@ def run_thrust1_suite(duration=15.0, sweep=False):
 
     t1_dir = os.path.join(SCRIPT_DIR, "T1")
     cuda_src = os.path.join(t1_dir, "gpu_power_poc_v3.cu")
-    cuda_bin = os.path.join(t1_dir, "gpu_power_poc_v3")
+    cuda_bin = os.path.join(t1_dir, "gpu_power_poc_v3" + _EXE)
     compile_cuda_backend(cuda_src, cuda_bin)
 
     exp_csv = os.path.join(t1_dir, "controlled_3phase_experiment_v2.csv")
@@ -71,7 +73,7 @@ def run_thrust3_suite(duration=15.0):
     t1_dir = os.path.join(SCRIPT_DIR, "T1")
     t3_dir = os.path.join(SCRIPT_DIR, "T3")
 
-    cuda_bin = os.path.join(t1_dir, "gpu_power_poc_v3")
+    cuda_bin = os.path.join(t1_dir, "gpu_power_poc_v3" + _EXE)
     if not os.path.exists(cuda_bin):
         raise FileNotFoundError(
             f"T1 CUDA binary not found: {cuda_bin}\n"

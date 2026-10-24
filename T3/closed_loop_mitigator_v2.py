@@ -12,6 +12,8 @@ PARENT_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, os.path.join(PARENT_DIR, "T1"))
 sys.path.insert(0, os.path.join(PARENT_DIR, "T2"))
 
+_EXE = ".exe" if sys.platform == "win32" else ""
+
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2
 from gpu_defense_filters_v2 import PlatformAgnosticAnomalyDetector
 
@@ -32,8 +34,10 @@ def get_current_power_limit(gpu_idx=0):
 
 
 def set_power_limit(watts, gpu_idx=0):
-    """Sets GPU power limit via nvidia-smi. Requires root/sudo on Jetson."""
-    cmd = ["sudo", "nvidia-smi", f"--id={gpu_idx}", f"-pl", str(int(watts))]
+    """Sets GPU power limit via nvidia-smi. Requires root/sudo on Linux."""
+    cmd = ["nvidia-smi", f"--id={gpu_idx}", f"-pl", str(int(watts))]
+    if sys.platform != "win32":
+        cmd.insert(0, "sudo")
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
         raise RuntimeError(
@@ -217,7 +221,7 @@ def run_closed_loop_experiment(
     reviewers can distinguish the two effects.
     """
     if cuda_binary is None:
-        cuda_binary = os.path.join(PARENT_DIR, "T1", "gpu_power_poc_v3")
+        cuda_binary = os.path.join(PARENT_DIR, "T1", "gpu_power_poc_v3" + _EXE)
     if output_csv is None:
         output_csv = os.path.join(SCRIPT_DIR, "closed_loop_mitigation_v2.csv")
 
