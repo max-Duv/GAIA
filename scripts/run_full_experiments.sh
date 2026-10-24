@@ -146,6 +146,8 @@ echo "====================================================================="
 cd "$GAIA_DIR"
 
 echo "[T3] Running closed-loop mitigation experiment..."
+# On Jetson: auto-detects devfreq and uses GPU clock capping (default 40% of max)
+# On desktop: falls back to nvidia-smi power limit capping
 python3 T3/closed_loop_mitigator_v2.py \
     --duration "$DURATION" \
     --trials 5 \

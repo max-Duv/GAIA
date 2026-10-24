@@ -18,10 +18,43 @@ from gpu_fault_assessor_v2 import GPUFaultAssessorV2
 from gpu_defense_filters_v2 import PlatformAgnosticAnomalyDetector
 
 
+def _find_jetson_devfreq():
+    """Detect Jetson GPU devfreq node for clock capping."""
+    for node in ['gpu-gpc-0']:
+        path = f'/sys/class/devfreq/{node}'
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def _read_devfreq_max(devfreq_path):
+    with open(os.path.join(devfreq_path, 'max_freq')) as f:
+        return int(f.read().strip())
+
+
+def _read_devfreq_available(devfreq_path):
+    with open(os.path.join(devfreq_path, 'available_frequencies')) as f:
+        return sorted(int(x) for x in f.read().split())
+
+
+def _snap_to_available(available, target_hz):
+    return min(available, key=lambda f: abs(f - target_hz))
+
+
+def _set_devfreq_max(devfreq_path, freq_hz):
+    freq_path = os.path.join(devfreq_path, 'max_freq')
+    cmd = ['sudo', 'sh', '-c', f'echo {int(freq_hz)} > {freq_path}']
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0:
+        print(f"    [!] WARNING: Could not set GPU clock to {freq_hz/1e6:.0f} MHz: {res.stderr.strip()}")
+        return False
+    print(f"    [+] GPU max clock set to {freq_hz/1e6:.0f} MHz")
+    return True
+
+
 def get_current_power_limit(gpu_idx=0):
     """Reads the current enforced power limit (watts).
     Tries nvidia-smi query, then pynvml, then power.max_limit as fallback."""
-    # Try nvidia-smi power.limit
     for field in ["power.limit", "power.max_limit"]:
         cmd = [
             "nvidia-smi", f"--id={gpu_idx}",
@@ -36,7 +69,6 @@ def get_current_power_limit(gpu_idx=0):
         except Exception:
             pass
 
-    # Try pynvml
     try:
         import pynvml
         pynvml.nvmlInit()
@@ -46,7 +78,6 @@ def get_current_power_limit(gpu_idx=0):
     except Exception:
         pass
 
-    # Jetson Thor default: 130W TDP
     print("    [!] WARNING: Cannot query power limit. Using 130W default (Jetson Thor TDP).")
     return 130.0
 
@@ -75,11 +106,13 @@ def _run_single_trial(
     stress_cmd,
     phases,
     duration_per_phase,
-    mitigation_power_cap_w,
-    original_power_limit,
-    gpu_idx,
+    apply_mitigation,
+    restore_normal,
+    mitigation_label,
 ):
-    """Runs one complete pass through all phases. Returns (all_records, summary_results)."""
+    """Runs one complete pass through all phases. Returns (all_records, summary_results).
+    apply_mitigation() and restore_normal() are callbacks for the platform-specific
+    power/clock capping mechanism."""
     print(f"\n{'='*69}")
     print(f"  Trial {trial_num}/{total_trials}")
     print(f"{'='*69}")
@@ -103,8 +136,8 @@ def _run_single_trial(
         mitigation_trigger_count = 0
 
         if p_info.get("force_clamp"):
-            print(f"    [+] Applying clamped power limit: {mitigation_power_cap_w:.0f}W")
-            set_power_limit(mitigation_power_cap_w, gpu_idx)
+            print(f"    [+] Applying clamped {mitigation_label}")
+            apply_mitigation()
 
         if p_info["run_stress"]:
             try:
@@ -142,13 +175,13 @@ def _run_single_trial(
             peak_db = spec_result[1]
 
             if p_info["mitigate"] and is_anomalous and not mitigation_active:
-                print(f"    [!] Anomaly detected (PSD peak: {peak_db:.1f} dB) — clamping power to {mitigation_power_cap_w:.0f}W")
-                clamp_ok = set_power_limit(mitigation_power_cap_w, gpu_idx)
+                print(f"    [!] Anomaly detected (PSD peak: {peak_db:.1f} dB) — applying {mitigation_label}")
+                clamp_ok = apply_mitigation()
                 if clamp_ok:
                     mitigation_active = True
                     mitigation_trigger_count += 1
                 else:
-                    print(f"    [!] Power clamp FAILED — mitigation NOT active")
+                    print(f"    [!] Mitigation clamp FAILED")
 
             all_records.append({
                 "trial": trial_num,
@@ -182,8 +215,8 @@ def _run_single_trial(
                 cuda_proc.kill()
 
         if mitigation_active or p_info.get("force_clamp"):
-            print(f"    [+] Restoring power limit to {original_power_limit:.0f}W")
-            set_power_limit(original_power_limit, gpu_idx)
+            print(f"    [+] Restoring normal operation")
+            restore_normal()
 
         phase_records = [r for r in all_records if r["phase"] == p_name]
         mean_tot = float(np.mean(latencies_tot))
@@ -213,34 +246,11 @@ def run_closed_loop_experiment(
     cuda_binary=None,
     duration_per_phase=15.0,
     mitigation_power_cap_w=None,
+    clock_cap_mhz=None,
     output_csv=None,
     gpu_idx=0,
     num_trials=5
 ):
-    """
-    Executes a controlled closed-loop mitigation experiment with repeated trials.
-
-    Each trial runs four phases:
-
-    Phase 1: 'attack_unmitigated'
-        Victim GEMM + pulsed stress, no power clamping.
-
-    Phase 2: 'attack_mitigated'
-        Victim GEMM + pulsed stress, with dynamic power limit clamping
-        triggered by T2 spectral anomaly detection.
-
-    Phase 3: 'victim_clamped_baseline'
-        Victim GEMM alone at the clamped power limit (no stress).
-        Measures the throughput cost of the power clamp itself.
-
-    Phase 4: 'recovery_baseline'
-        Victim GEMM alone at original power limit.
-        Confirms normal operation is restored.
-
-    The mitigation decomposition separates gross benefit (Phase1-Phase2) into
-    genuine attack mitigation and clamping overhead (Phase3-Phase4), so DAC
-    reviewers can distinguish the two effects.
-    """
     if cuda_binary is None:
         cuda_binary = os.path.join(PARENT_DIR, "T1", "gpu_power_poc_v3" + _EXE)
     if output_csv is None:
@@ -259,12 +269,36 @@ def run_closed_loop_experiment(
 
     assessor = GPUFaultAssessorV2(target_gpu_index=gpu_idx)
 
-    original_power_limit = get_current_power_limit(gpu_idx)
-    print(f"[+] Original power limit: {original_power_limit}W")
+    devfreq_path = _find_jetson_devfreq()
+    if devfreq_path:
+        available_freqs = _read_devfreq_available(devfreq_path)
+        original_max_freq = _read_devfreq_max(devfreq_path)
+        print(f"[+] Jetson devfreq detected: {devfreq_path}")
+        print(f"[+] Original max clock: {original_max_freq/1e6:.0f} MHz")
+        print(f"[+] Available range: {available_freqs[0]/1e6:.0f}–{available_freqs[-1]/1e6:.0f} MHz")
 
-    if mitigation_power_cap_w is None:
-        mitigation_power_cap_w = original_power_limit * 0.7
-    print(f"[+] Mitigation clamp target: {mitigation_power_cap_w:.0f}W")
+        if clock_cap_mhz is not None:
+            mit_freq = _snap_to_available(available_freqs, int(clock_cap_mhz * 1e6))
+        else:
+            mit_freq = _snap_to_available(available_freqs, int(original_max_freq * 0.4))
+        print(f"[+] Mitigation clock cap: {mit_freq/1e6:.0f} MHz")
+
+        mitigation_label = f"clock cap to {mit_freq/1e6:.0f} MHz"
+        apply_mitigation = lambda: _set_devfreq_max(devfreq_path, mit_freq)
+        restore_normal = lambda: _set_devfreq_max(devfreq_path, original_max_freq)
+        restore_msg = f"sudo sh -c 'echo {original_max_freq} > {devfreq_path}/max_freq'"
+    else:
+        original_power_limit = get_current_power_limit(gpu_idx)
+        print(f"[+] Original power limit: {original_power_limit}W")
+
+        if mitigation_power_cap_w is None:
+            mitigation_power_cap_w = original_power_limit * 0.7
+        print(f"[+] Mitigation clamp target: {mitigation_power_cap_w:.0f}W")
+
+        mitigation_label = f"power cap to {mitigation_power_cap_w:.0f}W"
+        apply_mitigation = lambda: set_power_limit(mitigation_power_cap_w, gpu_idx)
+        restore_normal = lambda: set_power_limit(original_power_limit, gpu_idx)
+        restore_msg = f"sudo nvidia-smi -pl {int(original_power_limit)}"
 
     stress_cmd = [
         cuda_binary,
@@ -296,20 +330,19 @@ def run_closed_loop_experiment(
                 stress_cmd=stress_cmd,
                 phases=phases,
                 duration_per_phase=duration_per_phase,
-                mitigation_power_cap_w=mitigation_power_cap_w,
-                original_power_limit=original_power_limit,
-                gpu_idx=gpu_idx,
+                apply_mitigation=apply_mitigation,
+                restore_normal=restore_normal,
+                mitigation_label=mitigation_label,
             )
             all_trial_records.extend(records)
             per_trial_summaries.append(summary)
 
     finally:
-        print(f"\n[+] Ensuring power limit is restored to {original_power_limit:.0f}W")
+        print(f"\n[+] Restoring original settings")
         try:
-            set_power_limit(original_power_limit, gpu_idx)
+            restore_normal()
         except Exception:
-            print("    [!] WARNING: Could not restore power limit. Run manually:")
-            print(f"        sudo nvidia-smi -pl {int(original_power_limit)}")
+            print(f"    [!] WARNING: Could not restore. Run manually: {restore_msg}")
 
     if all_trial_records:
         fieldnames = list(all_trial_records[0].keys())
@@ -406,7 +439,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Project GAIA T3: Closed-Loop Power Mitigation")
     parser.add_argument("--duration", type=float, default=15.0, help="Duration per phase in seconds")
     parser.add_argument("--cap", type=float, default=None,
-                        help="Mitigation power cap in watts (default: 70%% of current limit)")
+                        help="Mitigation power cap in watts (desktop GPU, default: 70%% of current limit)")
+    parser.add_argument("--clock-cap", type=float, default=None,
+                        help="Mitigation clock cap in MHz (Jetson devfreq, default: 40%% of max)")
     parser.add_argument("--out", type=str, default=None, help="Output CSV path")
     parser.add_argument("--gpu", type=int, default=0, help="GPU index")
     parser.add_argument("--trials", type=int, default=5, help="Number of repeated trials (default: 5)")
@@ -415,6 +450,7 @@ if __name__ == "__main__":
     run_closed_loop_experiment(
         duration_per_phase=args.duration,
         mitigation_power_cap_w=args.cap,
+        clock_cap_mhz=args.clock_cap,
         output_csv=args.out,
         gpu_idx=args.gpu,
         num_trials=args.trials
