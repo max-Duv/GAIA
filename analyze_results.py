@@ -582,7 +582,7 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         if window_size < 5:
             window_size = 5
 
-        features, labels = [], []
+        features, labels, trial_ids = [], [], []
         for i in range(0, len(t1_df) - window_size, window_size):
             sub = t1_df.iloc[i:i+window_size]
             features.append([
@@ -592,9 +592,11 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
                 sub['voltage_v'].max() - sub['voltage_v'].min()
             ])
             labels.append(1 if label_binary[i:i+window_size].mean() > 0.5 else 0)
+            trial_ids.append(int(sub['trial'].mode().iloc[0]))
 
         features = np.array(features)
         labels = np.array(labels)
+        trial_ids = np.array(trial_ids)
 
         n_benign = (labels == 0).sum()
         n_attack = (labels == 1).sum()
@@ -602,42 +604,107 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         lines.append(f"Window size: {window_size} telemetry samples")
 
         if len(features) > 4 and len(np.unique(labels)) == 2:
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(features)
-            pca = PCA(n_components=2)
-            X_pca = pca.fit_transform(X_scaled)
+            scaler_full = StandardScaler()
+            X_full = scaler_full.fit_transform(features)
+            pca_full = PCA(n_components=2)
+            pca_full.fit_transform(X_full)
 
             lines.append(f"\nPCA Explained Variance:")
-            lines.append(f"  PC1: {pca.explained_variance_ratio_[0]*100:.1f}%")
-            lines.append(f"  PC2: {pca.explained_variance_ratio_[1]*100:.1f}%")
-            lines.append(f"  Total (2 components): {pca.explained_variance_ratio_.sum()*100:.1f}%")
+            lines.append(f"  PC1: {pca_full.explained_variance_ratio_[0]*100:.1f}%")
+            lines.append(f"  PC2: {pca_full.explained_variance_ratio_[1]*100:.1f}%")
+            lines.append(f"  Total (2 components): {pca_full.explained_variance_ratio_.sum()*100:.1f}%")
 
-            loo = LeaveOneOut()
-            y_true, y_pred = [], []
-            for train_idx, test_idx in loo.split(X_scaled):
+            unique_trials = sorted(set(trial_ids))
+            y_true_lot, y_pred_lot = [], []
+            for held_out in unique_trials:
+                train_mask = trial_ids != held_out
+                test_mask = trial_ids == held_out
+                if labels[test_mask].size == 0 or labels[train_mask].size == 0:
+                    continue
+                if len(np.unique(labels[train_mask])) < 2:
+                    continue
+                s = StandardScaler()
+                X_train = s.fit_transform(features[train_mask])
+                X_test = s.transform(features[test_mask])
                 clf = LogisticRegression(max_iter=1000)
-                clf.fit(X_scaled[train_idx], labels[train_idx])
-                y_true.append(labels[test_idx[0]])
-                y_pred.append(clf.predict(X_scaled[test_idx])[0])
-            y_true = np.array(y_true)
-            y_pred = np.array(y_pred)
+                clf.fit(X_train, labels[train_mask])
+                preds = clf.predict(X_test)
+                y_true_lot.extend(labels[test_mask].tolist())
+                y_pred_lot.extend(preds.tolist())
 
-            acc = accuracy_score(y_true, y_pred)
-            prec = precision_score(y_true, y_pred, zero_division=0)
-            rec = recall_score(y_true, y_pred, zero_division=0)
-            f1 = f1_score(y_true, y_pred, zero_division=0)
+            if len(y_true_lot) > 0:
+                y_true_lot = np.array(y_true_lot)
+                y_pred_lot = np.array(y_pred_lot)
+                acc = accuracy_score(y_true_lot, y_pred_lot)
+                prec = precision_score(y_true_lot, y_pred_lot, zero_division=0)
+                rec = recall_score(y_true_lot, y_pred_lot, zero_division=0)
+                f1 = f1_score(y_true_lot, y_pred_lot, zero_division=0)
 
-            lines.append(f"\nLogistic Regression (LOO-CV on 4 features):")
-            lines.append(f"  Accuracy:  {acc*100:.1f}%")
-            lines.append(f"  Precision: {prec*100:.1f}%")
-            lines.append(f"  Recall:    {rec*100:.1f}%")
-            lines.append(f"  F1-Score:  {f1*100:.1f}%")
+                lines.append(f"\nLogistic Regression (leave-one-trial-out CV, scaler fit per fold):")
+                lines.append(f"  Trials held out: {len(unique_trials)}")
+                lines.append(f"  Accuracy:  {acc*100:.1f}%")
+                lines.append(f"  Precision: {prec*100:.1f}%")
+                lines.append(f"  Recall:    {rec*100:.1f}%")
+                lines.append(f"  F1-Score:  {f1*100:.1f}%")
 
-            clf_full = LogisticRegression(max_iter=1000).fit(X_scaled, labels)
-            lines.append(f"\nFeature weights (full model):")
-            feat_names = ['mean_power', 'std_power', 'min_voltage', 'voltage_range']
-            for fn, w in zip(feat_names, clf_full.coef_[0]):
-                lines.append(f"  {fn}: {w:.4f}")
+    # --- T2 Spectral Detector Metrics (from T3 data) ---
+    if t3_df is not None and 'anomaly_detected' in t3_df.columns:
+        lines.append("\n" + "-" * 72)
+        lines.append("TASK 2b: SPECTRAL DETECTOR EVALUATION (from T3 runs)")
+        lines.append("-" * 72)
+
+        for pn in t3_df['phase'].unique():
+            sub = t3_df[t3_df['phase'] == pn]
+            n = len(sub)
+            n_det = int(sub['anomaly_detected'].sum())
+            is_attack_phase = pn.startswith('attack')
+            ground_truth = 1 if is_attack_phase else 0
+            if ground_truth == 1:
+                tp = n_det
+                fn = n - n_det
+                tpr = tp / max(tp + fn, 1)
+                lines.append(f"  {pn:30s}: {n_det:3d}/{n} detected (TPR={tpr:.1%})")
+            else:
+                fp = n_det
+                tn = n - n_det
+                fpr = fp / max(fp + tn, 1)
+                lines.append(f"  {pn:30s}: {n_det:3d}/{n} detected (FPR={fpr:.1%})")
+
+        attack_phases = [p for p in t3_df['phase'].unique() if p.startswith('attack')]
+        benign_phases = [p for p in t3_df['phase'].unique() if not p.startswith('attack')]
+        tp_total = int(t3_df[t3_df['phase'].isin(attack_phases)]['anomaly_detected'].sum())
+        fn_total = len(t3_df[t3_df['phase'].isin(attack_phases)]) - tp_total
+        fp_total = int(t3_df[t3_df['phase'].isin(benign_phases)]['anomaly_detected'].sum())
+        tn_total = len(t3_df[t3_df['phase'].isin(benign_phases)]) - fp_total
+
+        spec_prec = tp_total / max(tp_total + fp_total, 1)
+        spec_rec = tp_total / max(tp_total + fn_total, 1)
+        spec_f1 = 2 * spec_prec * spec_rec / max(spec_prec + spec_rec, 1e-10)
+        spec_acc = (tp_total + tn_total) / max(tp_total + fn_total + fp_total + tn_total, 1)
+
+        lines.append(f"\n  Spectral Detector Aggregate:")
+        lines.append(f"    TP={tp_total}, FN={fn_total}, FP={fp_total}, TN={tn_total}")
+        lines.append(f"    Accuracy:  {spec_acc*100:.1f}%")
+        lines.append(f"    Precision: {spec_prec*100:.1f}%")
+        lines.append(f"    Recall:    {spec_rec*100:.1f}%")
+        lines.append(f"    F1-Score:  {spec_f1*100:.1f}%")
+
+        first_det_times = []
+        for trial in sorted(t3_df['trial'].unique()):
+            for pn in attack_phases:
+                td = t3_df[(t3_df['trial'] == trial) & (t3_df['phase'] == pn)]
+                det_rows = td[td['anomaly_detected'] == 1]
+                if len(det_rows) > 0:
+                    phase_start = td['timestamp'].min()
+                    first_det = det_rows['timestamp'].min()
+                    first_det_times.append(first_det - phase_start)
+        if first_det_times:
+            lines.append(f"\n  Detection Latency (time from phase start to first detection):")
+            lines.append(f"    Mean: {np.mean(first_det_times):.1f}s")
+            lines.append(f"    Min:  {np.min(first_det_times):.1f}s")
+            lines.append(f"    Max:  {np.max(first_det_times):.1f}s")
+        else:
+            lines.append(f"\n  Detection Latency: No detections during attack phases")
 
     # --- T3 Metrics ---
     if t3_df is not None:

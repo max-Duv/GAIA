@@ -355,6 +355,18 @@ def _print_aggregate_summary(per_trial_summaries, num_trials):
             pow_str = f"{a['pow_mean']:.2f} +/- {a['pow_std']:.2f}" if num_trials > 1 else f"{a['pow_mean']:.2f}"
             print(f"  {pn:<28}{lat_str:<22}{pow_str:<18}{a['volt_mean']:<12.4f}")
 
+    print(f"\n  Power-Cap Enforcement Check:")
+    if "attack_unmitigated" in agg and "attack_mitigated" in agg:
+        p_unmit = agg["attack_unmitigated"]["pow_mean"]
+        p_mit = agg["attack_mitigated"]["pow_mean"]
+        print(f"    Unmitigated mean power: {p_unmit:.2f} W")
+        print(f"    Mitigated mean power:   {p_mit:.2f} W")
+        if p_mit < p_unmit:
+            print(f"    Power reduction:        {p_unmit - p_mit:.2f} W ({(p_unmit - p_mit)/p_unmit*100:.1f}%)")
+            print(f"    Cap enforcement:        CONFIRMED (power dropped under mitigation)")
+        else:
+            print(f"    Cap enforcement:        NOT CONFIRMED (mitigated power >= unmitigated)")
+
     if "attack_unmitigated" in agg and "attack_mitigated" in agg:
         A = agg["attack_unmitigated"]["lat_mean"]
         B = agg["attack_mitigated"]["lat_mean"]

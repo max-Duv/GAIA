@@ -64,8 +64,9 @@ echo "====================================================================="
 
 cd "$GAIA_DIR/T1"
 
-# Compile CUDA binaries (auto-detects sm_110 for Thor)
-echo "[T1] Compiling CUDA backends..."
+# Force recompile CUDA binaries (source may have changed)
+echo "[T1] Removing old CUDA binaries and recompiling..."
+rm -f gpu_power_poc_v3 gpu_victim_kernel
 python3 controlled_3phase_runner_v2.py --duration 1 --trials 1
 
 echo "[T1] Running main 3-phase experiment (randomized phase order)..."

@@ -404,6 +404,15 @@ def run_controlled_3phase_experiment(
     else:
         print("  (skipped — not all core phases present)")
 
+    print("\n Power-Match Verification:")
+    for pn in ["victim_sustained_stress", "victim_pulsed_stress"]:
+        if pn in aggregate:
+            print(f"  {pn}: {aggregate[pn]['power']:.2f} W mean")
+    if "victim_sustained_stress" in aggregate and "victim_pulsed_stress" in aggregate:
+        ratio = aggregate["victim_sustained_stress"]["power"] / max(aggregate["victim_pulsed_stress"]["power"], 0.01)
+        matched = "YES" if 0.8 <= ratio <= 1.2 else "NO"
+        print(f"  Ratio (sustained/pulsed): {ratio:.3f}  Power-matched: {matched}")
+
     print("=====================================================================\n")
 
     return aggregate
