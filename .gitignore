@@ -1,0 +1,33 @@
+# Compiled CUDA binaries
+*.exe
+*.o
+*.out
+gpu_power_poc_v3
+gpu_victim_kernel
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+env/
+venv/
+*.egg-info/
+
+# Experiment outputs (commit selectively with git add -f)
+*.csv
+*.png
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jetson-specific
+*.nsys-rep
+*.ncu-rep
+*.nvvp
