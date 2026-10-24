@@ -7,6 +7,19 @@ import threading
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def _cuda_subprocess_env():
+    """Return an env dict for running compiled CUDA binaries.
+    Strips conda/pip CUDA libraries from LD_LIBRARY_PATH so the
+    system's JetPack CUDA runtime is used instead of the desktop one."""
+    env = os.environ.copy()
+    ld = env.get("LD_LIBRARY_PATH", "")
+    if ld:
+        cleaned = [p for p in ld.split(":")
+                   if "conda" not in p and "miniconda" not in p]
+        env["LD_LIBRARY_PATH"] = ":".join(cleaned)
+    return env
+
 try:
     import pynvml
     _PYNVML_AVAILABLE = True
@@ -288,7 +301,8 @@ class GPUFaultAssessorV2:
             "--elements", str(elements),
             "--inner-iters", str(inner_iters)
         ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        env = _cuda_subprocess_env()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         try:
             stdout, stderr = proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:

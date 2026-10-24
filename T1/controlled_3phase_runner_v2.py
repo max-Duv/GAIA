@@ -139,7 +139,8 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
                 "--duration", str(duration_per_phase + 3.0)
             ]
             try:
-                cuda_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                from gpu_fault_assessor_v2 import _cuda_subprocess_env
+                cuda_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_cuda_subprocess_env())
                 time.sleep(0.5)
             except Exception as e:
                 raise RuntimeError(f"Failed to spawn stress process: {e}")
