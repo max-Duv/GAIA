@@ -258,7 +258,9 @@ def run_controlled_3phase_experiment(
     if not os.path.exists(cuda_binary):
         compile_cuda_backend(out_binary=cuda_binary, arch_override=arch_override)
 
+    print("\n[init] Initializing hardware assessor...")
     assessor = GPUFaultAssessorV2()
+    print("[init] Assessor ready\n")
 
     phases = [
         {"name": "victim_alone", "mode": None, "freq": 0, "duty": 0.0},

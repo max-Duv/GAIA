@@ -3,6 +3,7 @@ import re
 import time
 import glob
 import subprocess
+import threading
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -23,15 +24,31 @@ class GPUFaultAssessorV2:
 
     def __init__(self, target_gpu_index=0):
         self.gpu_idx = target_gpu_index
+        print("[assessor] Discovering INA3221 sensor nodes...")
         self.ina3221_nodes = self._discover_jetson_ina3221_nodes()
+        print(f"[assessor] Found {len(self.ina3221_nodes)} INA3221 nodes")
 
         self._nvml_handle = None
         self._has_pynvml = False
         if _PYNVML_AVAILABLE:
             try:
-                pynvml.nvmlInit()
-                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_idx)
-                self._has_pynvml = True
+                print("[assessor] Initializing pynvml...")
+                result = [None]
+                def _try_nvml():
+                    try:
+                        pynvml.nvmlInit()
+                        result[0] = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_idx)
+                    except Exception:
+                        pass
+                t = threading.Thread(target=_try_nvml, daemon=True)
+                t.start()
+                t.join(timeout=5)
+                if result[0] is not None:
+                    self._nvml_handle = result[0]
+                    self._has_pynvml = True
+                    print("[assessor] pynvml ready")
+                else:
+                    print("[assessor] pynvml timed out or failed (expected on Jetson)")
             except Exception:
                 self._nvml_handle = None
                 self._has_pynvml = False
@@ -40,11 +57,14 @@ class GPUFaultAssessorV2:
         self._jtop_ok = False
         if _JTOP_AVAILABLE:
             try:
+                print("[assessor] Starting jtop...")
                 self._jtop = JTop()
                 self._jtop.start()
                 self._jtop_ok = True
+                print("[assessor] jtop ready")
             except Exception:
                 self._jtop = None
+                print("[assessor] jtop failed")
 
         self._victim_binary = os.path.join(SCRIPT_DIR, "gpu_victim_kernel")
         self._victim_compiled = os.path.exists(self._victim_binary)
