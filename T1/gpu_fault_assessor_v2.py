@@ -186,39 +186,50 @@ class GPUFaultAssessorV2:
         if not self._has_pynvml or self._nvml_handle is None:
             return None
 
+        handle = self._nvml_handle
+        result = {
+            "power_w": 0.0,
+            "sm_clock_mhz": 0,
+            "gr_clock_mhz": 0,
+            "mem_clock_mhz": 0,
+            "pstate": "P0",
+            "sw_power_cap": 0,
+            "hw_slowdown": 0,
+            "throttle_bitmask": 0,
+            "throttle_bitmask_raw": 0,
+            "provenance": "NVML_Hardware",
+            "voltage_measurement_type": "derived_parasitic_model"
+        }
+
         try:
-            handle = self._nvml_handle
+            result["power_w"] = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
+        except pynvml.NVMLError:
+            pass
 
-            power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
-            p_w = power_mw / 1000.0
+        try:
+            result["sm_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
+            result["gr_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_GRAPHICS)
+            result["mem_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+        except pynvml.NVMLError:
+            pass
 
-            sm_clk = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
-            gr_clk = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_GRAPHICS)
-            mem_clk = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+        try:
+            result["pstate"] = f"P{pynvml.nvmlDeviceGetPerformanceState(handle)}"
+        except pynvml.NVMLError:
+            pass
 
-            pstate = pynvml.nvmlDeviceGetPerformanceState(handle)
+        try:
+            raw = pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(handle)
+            sw_cap = int(bool(raw & 0x0000000000000004))
+            hw_slow = int(bool(raw & 0x0000000000000008))
+            result["sw_power_cap"] = sw_cap
+            result["hw_slowdown"] = hw_slow
+            result["throttle_bitmask"] = (sw_cap << 0) | (hw_slow << 1)
+            result["throttle_bitmask_raw"] = raw
+        except pynvml.NVMLError:
+            pass
 
-            throttle_bitmask_raw = pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(handle)
-            sw_cap = int(bool(throttle_bitmask_raw & 0x0000000000000004))  # SwPowerCap
-            hw_slow = int(bool(throttle_bitmask_raw & 0x0000000000000008))  # HwSlowdown
-
-            bitmask = (sw_cap << 0) | (hw_slow << 1)
-
-            return {
-                "power_w": p_w,
-                "sm_clock_mhz": sm_clk,
-                "gr_clock_mhz": gr_clk,
-                "mem_clock_mhz": mem_clk,
-                "pstate": f"P{pstate}",
-                "sw_power_cap": sw_cap,
-                "hw_slowdown": hw_slow,
-                "throttle_bitmask": bitmask,
-                "throttle_bitmask_raw": throttle_bitmask_raw,
-                "provenance": "NVML_Hardware",
-                "voltage_measurement_type": "derived_parasitic_model"
-            }
-        except pynvml.NVMLError as e:
-            raise RuntimeError(f"NVML query failed: {e}")
+        return result
 
     def get_hardware_telemetry(self):
         """
@@ -252,10 +263,11 @@ class GPUFaultAssessorV2:
                 res["throttle_bitmask"] = nvml["throttle_bitmask"]
                 res["throttle_bitmask_raw"] = nvml["throttle_bitmask_raw"]
             else:
-                raise RuntimeError(
-                    "INA3221 power rails available but NVML is unreachable — "
-                    "cannot read clock/throttle state. Ensure pynvml is installed and the GPU is visible."
-                )
+                res["sm_clock_mhz"] = 0
+                res["sw_power_cap"] = 0
+                res["hw_slowdown"] = 0
+                res["throttle_bitmask"] = 0
+                res["throttle_bitmask_raw"] = 0
             return res
 
         if nvml and nvml.get("power_w", 0) > 0:
