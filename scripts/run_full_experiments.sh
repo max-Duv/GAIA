@@ -24,11 +24,13 @@ echo "  Duration/phase: ${DURATION}s | Trials: ${TRIALS} | Sweep trials: ${SWEEP
 echo "  Results dir: $RESULTS_DIR"
 echo "====================================================================="
 
-# --- Sanity checks ---
+# --- Sanity checks (non-fatal — sklearn/matplotlib only needed for T2 batch plotting) ---
 echo ""
 echo "[prereq] Checking environment..."
 nvidia-smi --query-gpu=name,compute_cap,power.limit,driver_version --format=csv
-python3 -c "import numpy, pandas, scipy, sklearn, matplotlib; print('[prereq] Python packages OK')"
+python3 -c "import numpy, pandas, scipy; print('[prereq] Core packages (numpy, pandas, scipy) OK')"
+python3 -c "import sklearn; print('[prereq] scikit-learn OK')" 2>/dev/null || echo "[prereq] WARNING: scikit-learn missing — T2 batch plots will be skipped (run analyze_results.py on workstation instead)"
+python3 -c "import matplotlib; print('[prereq] matplotlib OK')" 2>/dev/null || echo "[prereq] WARNING: matplotlib missing — plots will be skipped"
 python3 -c "import pynvml; pynvml.nvmlInit(); print('[prereq] pynvml OK')"
 nvcc --version | tail -1
 echo ""
@@ -94,7 +96,7 @@ echo "[T1] Generating publication figures..."
 TDP=$(nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null | head -1)
 TDP=${TDP:-80}
 cd "$GAIA_DIR"
-python3 power_analysis_plotter.py "$RESULTS_DIR/t1_3phase_experiment.csv" "$TDP"
+python3 power_analysis_plotter.py "$RESULTS_DIR/t1_3phase_experiment.csv" "$TDP" || echo "[T1] WARNING: Plot generation failed. Will generate on workstation."
 # Move the generated PNG
 mv -f T1/power_sag_analysis_v2.png "$RESULTS_DIR/t1_power_sag_figure.png" 2>/dev/null || true
 
@@ -114,13 +116,13 @@ echo "[T2] Processing main experiment data..."
 python3 T2/gpu_defense_filters_v2.py \
     --mode batch \
     --file "$RESULTS_DIR/t1_3phase_experiment.csv" \
-    --output "$RESULTS_DIR/t2_defense_diagnostics.png"
+    --output "$RESULTS_DIR/t2_defense_diagnostics.png" || echo "[T2] WARNING: Batch processing failed (likely missing scikit-learn). Run analyze_results.py on workstation."
 
 echo "[T2] Processing sweep data..."
 python3 T2/gpu_defense_filters_v2.py \
     --mode batch \
     --file "$RESULTS_DIR/t1_sweep_experiment.csv" \
-    --output "$RESULTS_DIR/t2_sweep_diagnostics.png"
+    --output "$RESULTS_DIR/t2_sweep_diagnostics.png" || echo "[T2] WARNING: Sweep processing failed. Will process on workstation."
 
 echo "[T2] Complete."
 
