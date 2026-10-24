@@ -140,20 +140,26 @@ class PlatformAgnosticAnomalyDetector:
     def analyze_spectrum(self, threshold_db=-25.0):
         """
         Detects anomalous power spectral energy in the sub-Nyquist band.
-        At the telemetry sampling rate (~20 Hz), this identifies power envelope
-        modulation (elevated mean, increased variance, step transitions between
-        phases), not the kHz-scale attack modulation frequency itself.
+        At ~4 Hz telemetry sampling, this identifies power envelope
+        modulation (elevated mean, variance), not kHz-scale attack modulation.
         Returns (is_anomalous, peak_psd_db, nyquist_hz).
         """
-        nyquist_hz = self.sampling_rate_hz / 2.0
+        if len(self.time_buffer) >= 2:
+            dt_est = (self.time_buffer[-1] - self.time_buffer[0]) / (len(self.time_buffer) - 1)
+            self.sampling_rate_hz = 1.0 / max(dt_est, 0.01)
 
-        if len(self.power_buffer) < 64:
+        nyquist_hz = self.sampling_rate_hz / 2.0
+        min_samples = max(16, int(self.sampling_rate_hz * 3))
+
+        if len(self.power_buffer) < min_samples:
             return False, 0.0, nyquist_hz
 
         power_array = np.array(self.power_buffer) - np.mean(self.power_buffer)
-        freqs, psd = signal.welch(power_array, fs=self.sampling_rate_hz, nperseg=min(len(power_array), 128))
+        nperseg = min(len(power_array), max(16, int(self.sampling_rate_hz * 4)))
+        freqs, psd = signal.welch(power_array, fs=self.sampling_rate_hz, nperseg=nperseg)
 
-        target_band = (freqs >= 2.0)
+        min_freq = min(0.5, nyquist_hz * 0.3)
+        target_band = (freqs >= min_freq)
         if not np.any(target_band):
             return False, 0.0, nyquist_hz
 

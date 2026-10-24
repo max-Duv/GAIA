@@ -105,16 +105,17 @@ def significance_stars(p_value):
     return "ns"
 
 
-def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_label):
-    V_nominal = 1.0
-    R_parasitic = 0.0018
-    L_parasitic = 1.25e-7
-
+def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_label, randomize_order=False):
     records = []
     phase_summaries = {}
     trial_start = time.time()
-    prev_power = 0.0
+    prev_current_a = 0.0
     prev_time = trial_start
+
+    if randomize_order:
+        import random
+        phases = list(phases)
+        random.shuffle(phases)
 
     for p_info in phases:
         p_name = p_info["name"]
@@ -156,32 +157,35 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
             hw = assessor.get_hardware_telemetry()
 
             p_w = hw["power_w"]
-            v_meas = hw.get("voltage_v", V_nominal)
+            v_meas = hw.get("voltage_v", 0.0)
+            if v_meas <= 0:
+                v_meas = 19.75
 
-            curr_a = p_w / max(v_meas, 0.5)
-            prev_curr_a = prev_power / V_nominal
-            di_dt = (curr_a - prev_curr_a) / dt
-            v_drop_ir = curr_a * R_parasitic
-            v_drop_l = L_parasitic * di_dt
-            v_modeled = V_nominal - v_drop_ir - v_drop_l
+            curr_a = p_w / v_meas
+            di_dt = (curr_a - prev_current_a) / dt
+
+            sm_clk = hw.get("sm_clock_mhz", 0)
+            gpu_temp = hw.get("gpu_temp_c", 0)
 
             records.append({
                 "timestamp": round(t_curr - trial_start, 4),
                 "phase": p_name,
                 "data_source": hw["provenance"],
                 "power_w": round(p_w, 3),
-                "voltage_v": round(v_meas if hw["provenance"] == "Jetson_INA3221_Hardware" else v_modeled, 5),
-                "current_a": round(curr_a, 3),
-                "di_dt_amps_per_sec": round(di_dt, 2),
+                "voltage_v": round(v_meas, 5),
+                "current_a": round(curr_a, 4),
+                "di_dt_amps_per_sec": round(di_dt, 4),
+                "victim_kernel_ms": round(v_res["gpu_compute_ms"], 3),
                 "victim_total_latency_ms": round(v_res["total_latency_ms"], 3),
                 "victim_launch_delay_ms": round(v_res["launch_delay_ms"], 3),
-                "victim_gpu_compute_ms": round(v_res["gpu_compute_ms"], 3),
+                "sm_clock_mhz": sm_clk,
+                "gpu_temp_c": gpu_temp,
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
                 "throttle_bitmask": hw.get("throttle_bitmask", 0)
             })
 
-            prev_power = p_w
+            prev_current_a = curr_a
             prev_time = t_curr
             time.sleep(0.02)
 
@@ -225,6 +229,7 @@ def run_controlled_3phase_experiment(
     output_csv=None,
     sweep_mechanism=False,
     num_trials=10,
+    randomize_order=False,
     arch_override=None
 ):
     """
@@ -260,17 +265,20 @@ def run_controlled_3phase_experiment(
 
     phases = [
         {"name": "victim_alone", "mode": None, "freq": 0, "duty": 0.0},
-        {"name": "victim_matched_benign", "mode": "compute", "freq": 0.001, "duty": 1.0},
-        {"name": "victim_pulsed_stress", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5}
+        {"name": "victim_sustained_stress", "mode": "oversubscribe", "freq": 0.001, "duty": 1.0},
+        {"name": "victim_cache_only", "mode": "cache", "freq": 0.001, "duty": 1.0},
+        {"name": "victim_compute_only", "mode": "compute", "freq": 0.001, "duty": 1.0},
+        {"name": "victim_pulsed_stress", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5},
     ]
 
     if sweep_mechanism:
         sweep_windows_ms = [1, 5, 10, 50, 100, 250, 500]
         for w_ms in sweep_windows_ms:
+            freq_khz = 1.0 / (2.0 * w_ms)
             phases.append({
                 "name": f"sweep_window_{w_ms}ms",
                 "mode": "oversubscribe",
-                "freq": 1000.0 / (2.0 * w_ms),
+                "freq": freq_khz,
                 "duty": 0.5
             })
 
@@ -293,7 +301,8 @@ def run_controlled_3phase_experiment(
         print(f"{'='*60}")
 
         records, phase_summaries = run_single_trial(
-            phases, cuda_binary, duration_per_phase, assessor, f"T{trial_idx}"
+            phases, cuda_binary, duration_per_phase, assessor, f"T{trial_idx}",
+            randomize_order=randomize_order
         )
 
         for r in records:
@@ -309,9 +318,10 @@ def run_controlled_3phase_experiment(
     if all_records:
         fieldnames = [
             "trial", "timestamp", "phase", "data_source", "power_w", "voltage_v",
-            "current_a", "di_dt_amps_per_sec", "victim_total_latency_ms",
-            "victim_launch_delay_ms", "victim_gpu_compute_ms", "sw_power_cap",
-            "hw_slowdown", "throttle_bitmask"
+            "current_a", "di_dt_amps_per_sec", "victim_kernel_ms",
+            "victim_total_latency_ms", "victim_launch_delay_ms",
+            "sm_clock_mhz", "gpu_temp_c",
+            "sw_power_cap", "hw_slowdown", "throttle_bitmask"
         ]
         with open(output_csv, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -368,21 +378,27 @@ def run_controlled_3phase_experiment(
     # --- Paired t-tests ---
     print("\n Paired t-test across trial means)")
 
-    core_phases = ["victim_alone", "victim_matched_benign", "victim_pulsed_stress"]
+    core_phases = ["victim_alone", "victim_sustained_stress", "victim_pulsed_stress"]
     has_all_core = all(p in per_phase_trial_means and len(per_phase_trial_means[p]) == num_trials for p in core_phases)
 
     if has_all_core and num_trials >= 2:
         alone = np.array(per_phase_trial_means["victim_alone"])
-        benign = np.array(per_phase_trial_means["victim_matched_benign"])
+        sustained = np.array(per_phase_trial_means["victim_sustained_stress"])
         pulsed = np.array(per_phase_trial_means["victim_pulsed_stress"])
 
-        t_pb, p_pb = ttest_rel(pulsed, benign)
+        t_ps, p_ps = ttest_rel(pulsed, sustained)
         t_pa, p_pa = ttest_rel(pulsed, alone)
-        t_ba, p_ba = ttest_rel(benign, alone)
+        t_sa, p_sa = ttest_rel(sustained, alone)
 
-        print(f"  pulsed_stress vs matched_benign : t={t_pb:>7.3f}, p={p_pb:.6f} {significance_stars(p_pb)}")
-        print(f"  pulsed_stress vs victim_alone   : t={t_pa:>7.3f}, p={p_pa:.6f} {significance_stars(p_pa)}")
-        print(f"  matched_benign vs victim_alone  : t={t_ba:>7.3f}, p={p_ba:.6f} {significance_stars(p_ba)}")
+        print(f"  pulsed_stress vs sustained_stress: t={t_ps:>7.3f}, p={p_ps:.6f} {significance_stars(p_ps)}")
+        print(f"  pulsed_stress vs victim_alone    : t={t_pa:>7.3f}, p={p_pa:.6f} {significance_stars(p_pa)}")
+        print(f"  sustained_stress vs victim_alone : t={t_sa:>7.3f}, p={p_sa:.6f} {significance_stars(p_sa)}")
+
+        if "victim_cache_only" in per_phase_trial_means and "victim_compute_only" in per_phase_trial_means:
+            cache = np.array(per_phase_trial_means["victim_cache_only"])
+            compute = np.array(per_phase_trial_means["victim_compute_only"])
+            t_cc, p_cc = ttest_rel(cache, compute)
+            print(f"  cache_only vs compute_only       : t={t_cc:>7.3f}, p={p_cc:.6f} {significance_stars(p_cc)}")
     elif num_trials < 2:
         print("  (skipped — need >= 2 trials for paired t-test)")
     else:
@@ -400,6 +416,7 @@ if __name__ == "__main__":
     parser.add_argument("--sweep", action="store_true", help="Include launch-duration sweep for DAC Fig 6")
     parser.add_argument("--trials", type=int, default=10, help="Number of recorded trials (default: 10)")
     parser.add_argument("--arch", type=str, default=None, help="GPU arch override, e.g. sm_87 for Jetson Orin (skips detection)")
+    parser.add_argument("--randomize", action="store_true", help="Randomize phase order per trial")
     args = parser.parse_args()
 
     run_controlled_3phase_experiment(
@@ -407,5 +424,6 @@ if __name__ == "__main__":
         output_csv=args.out,
         sweep_mechanism=args.sweep,
         num_trials=args.trials,
-        arch_override=args.arch
+        arch_override=args.arch,
+        randomize_order=args.randomize
     )

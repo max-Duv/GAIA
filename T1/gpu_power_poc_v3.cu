@@ -27,18 +27,21 @@
 
 // --- KERNEL 1: PTX Cache-Eviction Kernel with Explicit Cache Hints ---
 __global__ void modulated_cache_enemy_ptx(
-    uint32_t *buf, 
-    size_t size, 
-    unsigned long long active_cycles, 
-    unsigned long long idle_cycles, 
-    unsigned long long total_pulses) 
+    uint32_t *buf,
+    size_t size,
+    unsigned long long active_cycles,
+    unsigned long long idle_cycles,
+    unsigned long long total_pulses)
 {
     size_t t_id = blockIdx.x * blockDim.x + threadIdx.x;
     size_t stride = 32;
     size_t buf_elements = size / sizeof(uint32_t);
+    unsigned long long k = 0;
 
     for (unsigned long long pulse = 0; pulse < total_pulses; ++pulse) {
-        for (unsigned long long k = 0; k < active_cycles; ++k) {
+        // --- Active Phase: cache-eviction work timed by clock64() ---
+        long long int active_start = clock64();
+        while ((clock64() - active_start) < (long long int)active_cycles) {
             size_t idx = (t_id * stride + k * 1024) % buf_elements;
             uint32_t *ptr = &buf[idx];
             uint32_t val = (uint32_t)(idx + k);
@@ -55,11 +58,12 @@ __global__ void modulated_cache_enemy_ptx(
                 : "l"(ptr)
                 : "memory"
             );
+            ++k;
         }
 
-        // --- Idle Phase (Microsecond Clock Spin-Stall for sharp di/dt drop) ---
-        long long int start_time = clock64();
-        while ((clock64() - start_time) < (long long int)idle_cycles) {
+        // --- Idle Phase: spin-stall timed by clock64() ---
+        long long int idle_start = clock64();
+        while ((clock64() - idle_start) < (long long int)idle_cycles) {
             asm volatile("" : : : "memory");
         }
     }
@@ -67,23 +71,25 @@ __global__ void modulated_cache_enemy_ptx(
 
 // --- KERNEL 2: INT32 Pipeline Saturation Kernel ---
 __global__ void modulated_compute_enemy(
-    unsigned long long active_cycles, 
-    unsigned long long idle_cycles, 
-    unsigned long long total_pulses) 
+    unsigned long long active_cycles,
+    unsigned long long idle_cycles,
+    unsigned long long total_pulses)
 {
     uint32_t val1 = threadIdx.x;
     uint32_t val2 = blockIdx.x;
 
     for (unsigned long long pulse = 0; pulse < total_pulses; ++pulse) {
-        for (unsigned long long k = 0; k < active_cycles; ++k) {
+        // --- Active Phase: compute work timed by clock64() ---
+        long long int active_start = clock64();
+        while ((clock64() - active_start) < (long long int)active_cycles) {
             val1 = (val1 * 1103515245 + 12345) + val2;
             val2 = (val2 * 1103515245 + 12345) + val1;
             asm volatile("" : "+r"(val1), "+r"(val2) :: "memory");
         }
 
-        // --- Idle Phase (Force rapid di/dt transient drop) ---
-        long long int start_time = clock64();
-        while ((clock64() - start_time) < (long long int)idle_cycles) {
+        // --- Idle Phase: spin-stall timed by clock64() ---
+        long long int idle_start = clock64();
+        while ((clock64() - idle_start) < (long long int)idle_cycles) {
             asm volatile("" : : : "memory");
         }
     }
@@ -100,9 +106,11 @@ __global__ void l2_scan_enemy(
     size_t t_id = blockIdx.x * blockDim.x + threadIdx.x;
     size_t stride = 32;
     size_t buf_elements = size / sizeof(uint32_t);
+    unsigned long long k = 0;
 
     for (unsigned long long pulse = 0; pulse < total_pulses; ++pulse) {
-        for (unsigned long long k = 0; k < active_cycles; ++k) {
+        long long int active_start = clock64();
+        while ((clock64() - active_start) < (long long int)active_cycles) {
             size_t idx = (t_id * stride + k * 1024) % buf_elements;
             uint32_t *ptr = &buf[idx];
             uint32_t val = (uint32_t)(idx ^ k);
@@ -119,10 +127,11 @@ __global__ void l2_scan_enemy(
                 : "l"(ptr)
                 : "memory"
             );
+            ++k;
         }
 
-        long long int start_time = clock64();
-        while ((clock64() - start_time) < (long long int)idle_cycles) {
+        long long int idle_start = clock64();
+        while ((clock64() - idle_start) < (long long int)idle_cycles) {
             asm volatile("" : : : "memory");
         }
     }
@@ -139,9 +148,11 @@ __global__ void l2_pin_enemy(
     size_t t_id = blockIdx.x * blockDim.x + threadIdx.x;
     size_t buf_elements = size / sizeof(uint32_t);
     size_t pin_stride = 32;
+    unsigned long long k = 0;
 
     for (unsigned long long pulse = 0; pulse < total_pulses; ++pulse) {
-        for (unsigned long long k = 0; k < active_cycles; ++k) {
+        long long int active_start = clock64();
+        while ((clock64() - active_start) < (long long int)active_cycles) {
             size_t idx = (t_id * pin_stride + k * pin_stride) % buf_elements;
             uint32_t *ptr = &buf[idx];
             uint32_t val = (uint32_t)(t_id + k);
@@ -151,10 +162,11 @@ __global__ void l2_pin_enemy(
                 : "l"(ptr), "r"(val)
                 : "memory"
             );
+            ++k;
         }
 
-        long long int start_time = clock64();
-        while ((clock64() - start_time) < (long long int)idle_cycles) {
+        long long int idle_start = clock64();
+        while ((clock64() - idle_start) < (long long int)idle_cycles) {
             asm volatile("" : : : "memory");
         }
     }

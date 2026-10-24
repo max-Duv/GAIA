@@ -58,7 +58,8 @@ echo "[info] System info saved to $RESULTS_DIR/system_info.txt"
 # =============================================================================
 echo ""
 echo "====================================================================="
-echo "  THRUST 1: 3-Phase Controlled Experiment (${TRIALS} trials)"
+echo "  THRUST 1: 5-Condition Controlled Experiment (${TRIALS} trials)"
+echo "  Conditions: alone, sustained_stress, cache_only, compute_only, pulsed_stress"
 echo "====================================================================="
 
 cd "$GAIA_DIR/T1"
@@ -67,10 +68,11 @@ cd "$GAIA_DIR/T1"
 echo "[T1] Compiling CUDA backends..."
 python3 controlled_3phase_runner_v2.py --duration 1 --trials 1
 
-echo "[T1] Running main 3-phase experiment..."
+echo "[T1] Running main 3-phase experiment (randomized phase order)..."
 python3 controlled_3phase_runner_v2.py \
     --duration "$DURATION" \
     --trials "$TRIALS" \
+    --randomize \
     --out "$RESULTS_DIR/t1_3phase_experiment.csv"
 
 # Copy the summary CSV too

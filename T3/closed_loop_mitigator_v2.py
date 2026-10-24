@@ -78,9 +78,6 @@ def _run_single_trial(
     mitigation_power_cap_w,
     original_power_limit,
     gpu_idx,
-    V_nominal,
-    R_parasitic,
-    L_parasitic,
 ):
     """Runs one complete pass through all phases. Returns (all_records, summary_results)."""
     print(f"\n{'='*69}")
@@ -90,12 +87,16 @@ def _run_single_trial(
     all_records = []
     summary_results = {}
     global_start = time.time()
-    prev_power = 0.0
+    prev_current_a = 0.0
     prev_time = global_start
 
     for p_info in phases:
         p_name = p_info["name"]
         print(f"\n[+] Phase: '{p_name}' ...")
+
+        detector.power_buffer.clear()
+        detector.voltage_buffer.clear()
+        detector.time_buffer.clear()
 
         cuda_proc = None
         mitigation_active = False
@@ -129,13 +130,11 @@ def _run_single_trial(
             hw = assessor.get_hardware_telemetry()
 
             p_w = hw["power_w"]
-            v_meas = hw.get("voltage_v", V_nominal)
-            curr_a = p_w / max(v_meas, 0.5)
-            prev_curr_a = prev_power / V_nominal
-            di_dt = (curr_a - prev_curr_a) / dt
-            v_drop_ir = curr_a * R_parasitic
-            v_drop_l = L_parasitic * di_dt
-            v_modeled = V_nominal - v_drop_ir - v_drop_l
+            v_meas = hw.get("voltage_v", 0.0)
+            if v_meas <= 0:
+                v_meas = 19.75
+            curr_a = p_w / v_meas
+            di_dt = (curr_a - prev_current_a) / dt
 
             detector.update_buffers(t_curr - global_start, p_w, v_meas)
             spec_result = detector.analyze_spectrum()
@@ -144,9 +143,12 @@ def _run_single_trial(
 
             if p_info["mitigate"] and is_anomalous and not mitigation_active:
                 print(f"    [!] Anomaly detected (PSD peak: {peak_db:.1f} dB) — clamping power to {mitigation_power_cap_w:.0f}W")
-                set_power_limit(mitigation_power_cap_w, gpu_idx)
-                mitigation_active = True
-                mitigation_trigger_count += 1
+                clamp_ok = set_power_limit(mitigation_power_cap_w, gpu_idx)
+                if clamp_ok:
+                    mitigation_active = True
+                    mitigation_trigger_count += 1
+                else:
+                    print(f"    [!] Power clamp FAILED — mitigation NOT active")
 
             all_records.append({
                 "trial": trial_num,
@@ -154,21 +156,21 @@ def _run_single_trial(
                 "phase": p_name,
                 "data_source": hw["provenance"],
                 "power_w": round(p_w, 3),
-                "voltage_v": round(
-                    v_meas if hw["provenance"] == "Jetson_INA3221_Hardware" else v_modeled, 5
-                ),
-                "current_a": round(curr_a, 3),
-                "di_dt_amps_per_sec": round(di_dt, 2),
+                "voltage_v": round(v_meas, 5),
+                "current_a": round(curr_a, 4),
+                "di_dt_amps_per_sec": round(di_dt, 4),
+                "victim_kernel_ms": round(v_res["gpu_compute_ms"], 3),
                 "victim_total_latency_ms": round(v_res["total_latency_ms"], 3),
-                "victim_gpu_compute_ms": round(v_res["gpu_compute_ms"], 3),
                 "anomaly_detected": int(is_anomalous),
                 "mitigation_active": int(mitigation_active),
+                "sm_clock_mhz": hw.get("sm_clock_mhz", 0),
+                "gpu_temp_c": hw.get("gpu_temp_c", 0),
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
                 "throttle_bitmask": hw.get("throttle_bitmask", 0)
             })
 
-            prev_power = p_w
+            prev_current_a = curr_a
             prev_time = t_curr
             time.sleep(0.02)
 
@@ -264,10 +266,6 @@ def run_closed_loop_experiment(
         mitigation_power_cap_w = original_power_limit * 0.7
     print(f"[+] Mitigation clamp target: {mitigation_power_cap_w:.0f}W")
 
-    V_nominal = 1.0
-    R_parasitic = 0.0018
-    L_parasitic = 1.25e-7
-
     stress_cmd = [
         cuda_binary,
         "--mode", "oversubscribe",
@@ -288,7 +286,7 @@ def run_closed_loop_experiment(
 
     try:
         for trial in range(1, num_trials + 1):
-            detector = PlatformAgnosticAnomalyDetector(sampling_rate_hz=20.0)
+            detector = PlatformAgnosticAnomalyDetector(sampling_rate_hz=4.0)
             records, summary = _run_single_trial(
                 trial_num=trial,
                 total_trials=num_trials,
@@ -301,9 +299,6 @@ def run_closed_loop_experiment(
                 mitigation_power_cap_w=mitigation_power_cap_w,
                 original_power_limit=original_power_limit,
                 gpu_idx=gpu_idx,
-                V_nominal=V_nominal,
-                R_parasitic=R_parasitic,
-                L_parasitic=L_parasitic,
             )
             all_trial_records.extend(records)
             per_trial_summaries.append(summary)

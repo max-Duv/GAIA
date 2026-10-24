@@ -21,6 +21,9 @@ import scipy.signal as signal
 from scipy.stats import ttest_rel
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import LeaveOneOut
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 import matplotlib
 matplotlib.use('Agg')
@@ -58,8 +61,11 @@ def figure_t1_power_characterization(df, out_dir, tdp_w=80.0):
 
     phase_colors = {
         'victim_alone': ('#27ae60', 'Baseline (Victim Alone)'),
-        'victim_matched_benign': ('#2980b9', 'Matched Benign Stress'),
+        'victim_sustained_stress': ('#2980b9', 'Sustained Stress (DC)'),
+        'victim_cache_only': ('#8e44ad', 'Cache-Only Stress'),
+        'victim_compute_only': ('#f39c12', 'Compute-Only Stress'),
         'victim_pulsed_stress': ('#c0392b', '10 kHz Pulsed Attack'),
+        'victim_matched_benign': ('#2980b9', 'Matched Benign Stress'),
     }
 
     for phase_name, (color, label) in phase_colors.items():
@@ -130,45 +136,58 @@ def figure_t1_power_characterization(df, out_dir, tdp_w=80.0):
 # Figure 2: T1 Victim Latency Degradation (box + strip)
 # =============================================================================
 def figure_t1_latency_degradation(df, out_dir):
-    print("\n[Fig 2] T1 Victim Latency Degradation")
+    print("\n[Fig 2] T1 Victim Latency by Condition")
 
     plt.rcParams.update({'font.size': 9, 'font.family': 'serif'})
 
-    core_phases = ['victim_alone', 'victim_matched_benign', 'victim_pulsed_stress']
-    phase_labels = ['Baseline\n(Victim Alone)', 'Matched Benign\nStress', '10 kHz Pulsed\nAttack']
-    colors = ['#27ae60', '#2980b9', '#c0392b']
+    all_phases = [p for p in df['phase'].unique() if not p.startswith('sweep_')]
+    short_labels = {
+        'victim_alone': 'Baseline',
+        'victim_sustained_stress': 'Sustained',
+        'victim_cache_only': 'Cache',
+        'victim_compute_only': 'Compute',
+        'victim_pulsed_stress': 'Pulsed',
+        'victim_matched_benign': 'Benign',
+    }
+    color_map = {
+        'victim_alone': '#27ae60',
+        'victim_sustained_stress': '#2980b9',
+        'victim_cache_only': '#8e44ad',
+        'victim_compute_only': '#f39c12',
+        'victim_pulsed_stress': '#c0392b',
+        'victim_matched_benign': '#2980b9',
+    }
+    present = [p for p in all_phases if not df[df['phase'] == p].empty]
+    labels = [short_labels.get(p, p.replace('victim_', '')) for p in present]
+    colors = [color_map.get(p, '#888888') for p in present]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 3.5), gridspec_kw={'width_ratios': [2, 1]})
 
-    data_groups = []
-    for pn in core_phases:
-        vals = df[df['phase'] == pn]['victim_total_latency_ms'].values
-        data_groups.append(vals)
+    data_groups = [df[df['phase'] == pn]['victim_total_latency_ms'].values for pn in present]
 
-    bp = ax1.boxplot(data_groups, labels=phase_labels, patch_artist=True, widths=0.5,
+    bp = ax1.boxplot(data_groups, labels=labels, patch_artist=True, widths=0.5,
                      medianprops=dict(color='black', linewidth=1.5))
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.6)
 
-    ax1.set_ylabel("Victim Latency (ms)")
-    ax1.set_title("(a) Victim Workload Latency Distribution", fontweight='bold')
+    ax1.set_ylabel("Victim Kernel Time (ms)")
+    ax1.set_title("(a) Victim Workload Kernel Time Distribution", fontweight='bold')
     ax1.grid(True, axis='y', linestyle=':', alpha=0.5)
 
     trial_means = {}
-    for pn in core_phases:
+    for pn in present:
         trial_means[pn] = df[df['phase'] == pn].groupby('trial')['victim_total_latency_ms'].mean().values
 
-    if all(pn in trial_means and len(trial_means[pn]) >= 2 for pn in core_phases):
-        x = np.arange(len(core_phases))
-        means = [np.mean(trial_means[pn]) for pn in core_phases]
-        stds = [np.std(trial_means[pn], ddof=1) for pn in core_phases]
-        bars = ax2.bar(x, means, yerr=stds, capsize=4, color=colors, alpha=0.7, edgecolor='gray')
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(['Baseline', 'Benign', 'Pulsed'], fontsize=8)
-        ax2.set_ylabel("Mean Latency (ms)")
-        ax2.set_title("(b) Per-Trial Means ± SD", fontweight='bold')
-        ax2.grid(True, axis='y', linestyle=':', alpha=0.5)
+    x = np.arange(len(present))
+    means = [np.mean(trial_means[pn]) for pn in present]
+    stds = [np.std(trial_means[pn], ddof=1) if len(trial_means[pn]) > 1 else 0 for pn in present]
+    ax2.bar(x, means, yerr=stds, capsize=4, color=colors, alpha=0.7, edgecolor='gray')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels, fontsize=7, rotation=30, ha='right')
+    ax2.set_ylabel("Mean Kernel Time (ms)")
+    ax2.set_title("(b) Per-Trial Means +/- SD", fontweight='bold')
+    ax2.grid(True, axis='y', linestyle=':', alpha=0.5)
 
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, "fig2_t1_latency_degradation.png"), dpi=300, bbox_inches='tight')
@@ -199,8 +218,11 @@ def figure_t2_defense_diagnostics(df, out_dir):
 
     phase_color_map = {
         'victim_alone': '#27ae60',
-        'victim_matched_benign': '#2980b9',
+        'victim_sustained_stress': '#2980b9',
+        'victim_cache_only': '#8e44ad',
+        'victim_compute_only': '#f39c12',
         'victim_pulsed_stress': '#c0392b',
+        'victim_matched_benign': '#2980b9',
     }
     for phase_name, color in phase_color_map.items():
         mask = df['phase'] == phase_name
@@ -383,8 +405,8 @@ def figure_t1_sweep(df, out_dir):
         print("  [skip] No sweep phases found")
         return
 
-    core_phases = ['victim_alone', 'victim_matched_benign', 'victim_pulsed_stress']
-    all_phases = core_phases + sorted(sweep_phases, key=lambda x: int(x.split('_')[-1].replace('ms', '')))
+    core_phases = [p for p in df['phase'].unique() if not p.startswith('sweep_')]
+    all_phases = list(core_phases) + sorted(sweep_phases, key=lambda x: int(x.split('_')[-1].replace('ms', '')))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 3.5))
 
@@ -453,10 +475,11 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         lines.append("TASK 1: ATTACK EFFECTIVENESS METRICS")
         lines.append("=" * 72)
 
-        core_phases = ['victim_alone', 'victim_matched_benign', 'victim_pulsed_stress']
+        all_phases = [p for p in t1_df['phase'].unique() if not p.startswith('sweep_')]
+        core_phases = [p for p in all_phases if p in t1_df['phase'].values]
 
-        lines.append(f"\n{'Phase':<28}{'Latency(ms)':<18}{'Power(W)':<16}{'Min V(V)':<12}{'Cap Rate%':<10}")
-        lines.append("-" * 84)
+        lines.append(f"\n{'Phase':<32}{'Latency(ms)':<18}{'Power(W)':<16}{'Min V(V)':<12}{'Cap Rate%':<10}")
+        lines.append("-" * 88)
 
         for pn in core_phases:
             sub = t1_df[t1_df['phase'] == pn]
@@ -468,65 +491,153 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
             cap_count = ((sub['sw_power_cap'] == 1) | (sub['hw_slowdown'] == 1)).sum()
             cap_rate = cap_count / len(sub) * 100
 
-            lat_str = f"{trial_lat.mean():.2f} ± {trial_lat.std():.2f}"
-            pow_str = f"{trial_pow.mean():.2f} ± {trial_pow.std():.2f}"
-            lines.append(f"{pn:<28}{lat_str:<18}{pow_str:<16}{min_v:<12.5f}{cap_rate:<10.1f}")
+            lat_str = f"{trial_lat.mean():.2f} +/- {trial_lat.std():.2f}"
+            pow_str = f"{trial_pow.mean():.2f} +/- {trial_pow.std():.2f}"
+            lines.append(f"{pn:<32}{lat_str:<18}{pow_str:<16}{min_v:<12.5f}{cap_rate:<10.1f}")
 
-        # Power variance
+        if 'sm_clock_mhz' in t1_df.columns:
+            lines.append("\nClock Frequency by Phase:")
+            for pn in core_phases:
+                sub = t1_df[t1_df['phase'] == pn]
+                clk = sub['sm_clock_mhz']
+                if clk.sum() > 0:
+                    lines.append(f"  {pn}: {clk.mean():.0f} +/- {clk.std():.0f} MHz")
+
+        if 'gpu_temp_c' in t1_df.columns:
+            lines.append("\nGPU Temperature by Phase:")
+            for pn in core_phases:
+                sub = t1_df[t1_df['phase'] == pn]
+                tmp = sub['gpu_temp_c']
+                if tmp.sum() > 0:
+                    lines.append(f"  {pn}: {tmp.mean():.1f} +/- {tmp.std():.1f} C")
+
         lines.append("\nPower Variance by Phase:")
         for pn in core_phases:
             sub = t1_df[t1_df['phase'] == pn]
             if sub.empty:
                 continue
-            lines.append(f"  {pn}: σ²={sub['power_w'].var():.4f} W², σ={sub['power_w'].std():.4f} W")
+            lines.append(f"  {pn}: var={sub['power_w'].var():.4f} W^2, std={sub['power_w'].std():.4f} W")
 
-        # Peak power
         peak_power = t1_df['power_w'].max()
         lines.append(f"\nPeak Power Draw: {peak_power:.2f} W")
 
-        # di/dt magnitude
+        lines.append("\nModule Rail Current di/dt by Phase:")
         for pn in core_phases:
             sub = t1_df[t1_df['phase'] == pn]
             if sub.empty:
                 continue
-            lines.append(f"  {pn} |di/dt|_max: {sub['di_dt_amps_per_sec'].abs().max():.2f} A/s")
+            lines.append(f"  {pn} |di/dt|_max: {sub['di_dt_amps_per_sec'].abs().max():.4f} A/s")
 
-        # Voltage sag depth
+        lines.append("\nModule Rail Voltage by Phase:")
         for pn in core_phases:
             sub = t1_df[t1_df['phase'] == pn]
             if sub.empty:
                 continue
             lines.append(f"  {pn} V_min: {sub['voltage_v'].min():.5f} V")
 
-        # Paired t-tests
+        lines.append("\nActual Sampling Rate by Phase:")
+        for pn in core_phases:
+            sub = t1_df[(t1_df['phase'] == pn) & (t1_df['trial'] == 1)]
+            dts = sub['timestamp'].diff().dropna()
+            if len(dts) > 0:
+                lines.append(f"  {pn}: {1/dts.median():.1f} Hz (median dt={dts.median():.3f}s)")
+
         trial_means = {}
         for pn in core_phases:
-            trial_means[pn] = t1_df[t1_df['phase'] == pn].groupby('trial')['victim_total_latency_ms'].mean().values
+            vals = t1_df[t1_df['phase'] == pn].groupby('trial')['victim_total_latency_ms'].mean().values
+            if len(vals) > 0:
+                trial_means[pn] = vals
 
-        if all(pn in trial_means and len(trial_means[pn]) >= 2 for pn in core_phases):
+        if len(trial_means) >= 2:
             lines.append("\nPaired t-tests (per-trial mean latency):")
+            phase_list = list(trial_means.keys())
+            for i in range(len(phase_list)):
+                for j in range(i+1, len(phase_list)):
+                    a, b = phase_list[i], phase_list[j]
+                    va, vb = trial_means[a], trial_means[b]
+                    if len(va) == len(vb) and len(va) >= 2:
+                        t_stat, p_val = ttest_rel(va, vb)
+                        d = compute_cohens_d(va, vb)
+                        sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "ns"
+                        lines.append(f"  {a} vs {b}:")
+                        lines.append(f"    t={t_stat:.4f}, p={p_val:.6f} {sig}, Cohen's d={d:.3f}")
 
-            pairs = [
-                ('victim_pulsed_stress', 'victim_matched_benign'),
-                ('victim_pulsed_stress', 'victim_alone'),
-                ('victim_matched_benign', 'victim_alone'),
-            ]
-            for a, b in pairs:
-                va, vb = trial_means[a], trial_means[b]
-                if len(va) == len(vb) and len(va) >= 2:
-                    t_stat, p_val = ttest_rel(va, vb)
-                    d = compute_cohens_d(va, vb)
-                    sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "ns"
-                    lines.append(f"  {a} vs {b}:")
-                    lines.append(f"    t={t_stat:.4f}, p={p_val:.6f} {sig}, Cohen's d={d:.3f}")
-
-        # Percentile breakdown
         lines.append("\nLatency Percentiles:")
         for pn in core_phases:
             sub = t1_df[t1_df['phase'] == pn]['victim_total_latency_ms']
             if sub.empty:
                 continue
             lines.append(f"  {pn}: p50={sub.quantile(0.50):.2f}, p95={sub.quantile(0.95):.2f}, p99={sub.quantile(0.99):.2f} ms")
+
+    # --- T2 Detection Metrics ---
+    if t1_df is not None:
+        lines.append("\n" + "=" * 72)
+        lines.append("TASK 2: DETECTION & ANOMALY METRICS")
+        lines.append("=" * 72)
+
+        label_binary = t1_df['phase'].apply(
+            lambda x: 1 if 'stress' in str(x).lower() or 'pulsed' in str(x).lower() else 0
+        ).values
+        window_size = min(len(t1_df) // 10, 50)
+        if window_size < 5:
+            window_size = 5
+
+        features, labels = [], []
+        for i in range(0, len(t1_df) - window_size, window_size):
+            sub = t1_df.iloc[i:i+window_size]
+            features.append([
+                sub['power_w'].mean(),
+                sub['power_w'].std(),
+                sub['voltage_v'].min(),
+                sub['voltage_v'].max() - sub['voltage_v'].min()
+            ])
+            labels.append(1 if label_binary[i:i+window_size].mean() > 0.5 else 0)
+
+        features = np.array(features)
+        labels = np.array(labels)
+
+        n_benign = (labels == 0).sum()
+        n_attack = (labels == 1).sum()
+        lines.append(f"\nWindowed samples: {len(labels)} ({n_benign} benign, {n_attack} attack)")
+        lines.append(f"Window size: {window_size} telemetry samples")
+
+        if len(features) > 4 and len(np.unique(labels)) == 2:
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(features)
+            pca = PCA(n_components=2)
+            X_pca = pca.fit_transform(X_scaled)
+
+            lines.append(f"\nPCA Explained Variance:")
+            lines.append(f"  PC1: {pca.explained_variance_ratio_[0]*100:.1f}%")
+            lines.append(f"  PC2: {pca.explained_variance_ratio_[1]*100:.1f}%")
+            lines.append(f"  Total (2 components): {pca.explained_variance_ratio_.sum()*100:.1f}%")
+
+            loo = LeaveOneOut()
+            y_true, y_pred = [], []
+            for train_idx, test_idx in loo.split(X_scaled):
+                clf = LogisticRegression(max_iter=1000)
+                clf.fit(X_scaled[train_idx], labels[train_idx])
+                y_true.append(labels[test_idx[0]])
+                y_pred.append(clf.predict(X_scaled[test_idx])[0])
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
+
+            acc = accuracy_score(y_true, y_pred)
+            prec = precision_score(y_true, y_pred, zero_division=0)
+            rec = recall_score(y_true, y_pred, zero_division=0)
+            f1 = f1_score(y_true, y_pred, zero_division=0)
+
+            lines.append(f"\nLogistic Regression (LOO-CV on 4 features):")
+            lines.append(f"  Accuracy:  {acc*100:.1f}%")
+            lines.append(f"  Precision: {prec*100:.1f}%")
+            lines.append(f"  Recall:    {rec*100:.1f}%")
+            lines.append(f"  F1-Score:  {f1*100:.1f}%")
+
+            clf_full = LogisticRegression(max_iter=1000).fit(X_scaled, labels)
+            lines.append(f"\nFeature weights (full model):")
+            feat_names = ['mean_power', 'std_power', 'min_voltage', 'voltage_range']
+            for fn, w in zip(feat_names, clf_full.coef_[0]):
+                lines.append(f"  {fn}: {w:.4f}")
 
     # --- T3 Metrics ---
     if t3_df is not None:
@@ -597,7 +708,7 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
 
     report_text = "\n".join(lines)
     report_path = os.path.join(out_dir, "metrics_report.txt")
-    with open(report_path, "w") as f:
+    with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_text)
 
     print(report_text)
@@ -611,11 +722,14 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
     print("\n[Tables] Generating LaTeX-ready tables...")
 
     if t1_df is not None:
-        core_phases = ['victim_alone', 'victim_matched_benign', 'victim_pulsed_stress']
+        core_phases = [p for p in t1_df['phase'].unique() if not p.startswith('sweep_')]
         phase_labels = {
             'victim_alone': 'Baseline (Victim Alone)',
+            'victim_sustained_stress': 'Sustained Stress (DC)',
+            'victim_cache_only': 'Cache-Only Stress',
+            'victim_compute_only': 'Compute-Only Stress',
+            'victim_pulsed_stress': '10 kHz Pulsed Attack',
             'victim_matched_benign': 'Matched Benign Stress',
-            'victim_pulsed_stress': '10 kHz Pulsed Attack'
         }
 
         rows = []
@@ -640,7 +754,7 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
             table_df = pd.DataFrame(rows)
             latex = table_df.to_latex(index=False, escape=False, column_format='lcccc')
             path = os.path.join(out_dir, "table_t1_results.tex")
-            with open(path, 'w') as f:
+            with open(path, 'w', encoding='utf-8') as f:
                 f.write(latex)
             print(f"  [saved] table_t1_results.tex")
 
@@ -672,7 +786,7 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
             table_df = pd.DataFrame(rows)
             latex = table_df.to_latex(index=False, escape=False, column_format='lccc')
             path = os.path.join(out_dir, "table_t3_results.tex")
-            with open(path, 'w') as f:
+            with open(path, 'w', encoding='utf-8') as f:
                 f.write(latex)
             print(f"  [saved] table_t3_results.tex")
 

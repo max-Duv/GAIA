@@ -195,6 +195,7 @@ class GPUFaultAssessorV2:
             "sm_clock_mhz": 0,
             "gr_clock_mhz": 0,
             "mem_clock_mhz": 0,
+            "gpu_temp_c": 0,
             "pstate": "P0",
             "sw_power_cap": 0,
             "hw_slowdown": 0,
@@ -213,6 +214,11 @@ class GPUFaultAssessorV2:
             result["sm_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
             result["gr_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_GRAPHICS)
             result["mem_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+        except pynvml.NVMLError:
+            pass
+
+        try:
+            result["gpu_temp_c"] = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
         except pynvml.NVMLError:
             pass
 
@@ -247,30 +253,24 @@ class GPUFaultAssessorV2:
         ina = self.query_jetson_ina3221_telemetry()
         nvml = self.query_nvml_telemetry()
 
+        def _merge_nvml(res, nvml_data):
+            if nvml_data:
+                for k in ("sm_clock_mhz", "gpu_temp_c", "sw_power_cap",
+                           "hw_slowdown", "throttle_bitmask", "throttle_bitmask_raw"):
+                    res[k] = nvml_data.get(k, 0)
+            else:
+                for k in ("sm_clock_mhz", "gpu_temp_c", "sw_power_cap",
+                           "hw_slowdown", "throttle_bitmask", "throttle_bitmask_raw"):
+                    res.setdefault(k, 0)
+
         if jtop_data and jtop_data.get("power_w", 0) > 0:
             res = jtop_data
-            if nvml:
-                res["sm_clock_mhz"] = nvml["sm_clock_mhz"]
-                res["sw_power_cap"] = nvml["sw_power_cap"]
-                res["hw_slowdown"] = nvml["hw_slowdown"]
-                res["throttle_bitmask"] = nvml["throttle_bitmask"]
-                res["throttle_bitmask_raw"] = nvml["throttle_bitmask_raw"]
+            _merge_nvml(res, nvml)
             return res
 
         if ina and ina.get("power_w", 0) > 0:
             res = ina
-            if nvml:
-                res["sm_clock_mhz"] = nvml["sm_clock_mhz"]
-                res["sw_power_cap"] = nvml["sw_power_cap"]
-                res["hw_slowdown"] = nvml["hw_slowdown"]
-                res["throttle_bitmask"] = nvml["throttle_bitmask"]
-                res["throttle_bitmask_raw"] = nvml["throttle_bitmask_raw"]
-            else:
-                res["sm_clock_mhz"] = 0
-                res["sw_power_cap"] = 0
-                res["hw_slowdown"] = 0
-                res["throttle_bitmask"] = 0
-                res["throttle_bitmask_raw"] = 0
+            _merge_nvml(res, nvml)
             return res
 
         if nvml and nvml.get("power_w", 0) > 0:
