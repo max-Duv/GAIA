@@ -19,32 +19,51 @@ from gpu_defense_filters_v2 import PlatformAgnosticAnomalyDetector
 
 
 def get_current_power_limit(gpu_idx=0):
-    """Reads the current enforced power limit (watts) from nvidia-smi."""
-    cmd = [
-        "nvidia-smi", f"--id={gpu_idx}",
-        "--query-gpu=power.limit", "--format=csv,noheader,nounits"
-    ]
+    """Reads the current enforced power limit (watts).
+    Tries nvidia-smi query, then pynvml, then power.max_limit as fallback."""
+    # Try nvidia-smi power.limit
+    for field in ["power.limit", "power.max_limit"]:
+        cmd = [
+            "nvidia-smi", f"--id={gpu_idx}",
+            f"--query-gpu={field}", "--format=csv,noheader,nounits"
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode == 0:
+                val = res.stdout.strip()
+                if val and val != "[N/A]" and val != "N/A":
+                    return float(val)
+        except Exception:
+            pass
+
+    # Try pynvml
     try:
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res.returncode == 0:
-            return float(res.stdout.strip())
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+        limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+        return limit_mw / 1000.0
     except Exception:
         pass
-    raise RuntimeError("Cannot read current power limit from nvidia-smi.")
+
+    # Jetson Thor default: 130W TDP
+    print("    [!] WARNING: Cannot query power limit. Using 130W default (Jetson Thor TDP).")
+    return 130.0
 
 
 def set_power_limit(watts, gpu_idx=0):
-    """Sets GPU power limit via nvidia-smi. Requires root/sudo on Linux."""
+    """Sets GPU power limit via nvidia-smi. Requires root/sudo on Linux.
+    Returns True on success, False on failure (non-fatal)."""
     cmd = ["nvidia-smi", f"--id={gpu_idx}", f"-pl", str(int(watts))]
     if sys.platform != "win32":
         cmd.insert(0, "sudo")
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
-        raise RuntimeError(
-            f"Failed to set power limit to {watts}W: {res.stderr.strip()}\n"
-            "On Jetson Orin, this requires root. Run with sudo."
-        )
+        print(f"    [!] WARNING: Could not set power limit to {watts}W: {res.stderr.strip()}")
+        print(f"    [!] T3 will still collect data but clamping may not take effect.")
+        return False
     print(f"    [+] Power limit set to {int(watts)}W")
+    return True
 
 
 def _run_single_trial(

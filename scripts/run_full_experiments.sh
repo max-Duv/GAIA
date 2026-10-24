@@ -94,8 +94,13 @@ cp -f controlled_3phase_experiment_v2_summary.csv \
 
 # Generate T1 publication figure
 echo "[T1] Generating publication figures..."
-TDP=$(nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null | head -1)
-TDP=${TDP:-80}
+TDP_RAW=$(nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null | head -1)
+# Thor reports [N/A]; default to 130W (Thor TDP)
+if echo "$TDP_RAW" | grep -qE '^[0-9]+\.?[0-9]*$'; then
+    TDP="$TDP_RAW"
+else
+    TDP=130
+fi
 cd "$GAIA_DIR"
 python3 power_analysis_plotter.py "$RESULTS_DIR/t1_3phase_experiment.csv" "$TDP" || echo "[T1] WARNING: Plot generation failed. Will generate on workstation."
 # Move the generated PNG
