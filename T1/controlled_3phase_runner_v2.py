@@ -4,6 +4,7 @@ import time
 import subprocess
 import csv
 import argparse
+import platform
 import numpy as np
 import pandas as pd
 from scipy.stats import ttest_rel
@@ -23,20 +24,27 @@ JETSON_ARCH = {
 def detect_gpu_arch():
     print("[arch] Detecting GPU compute capability...")
 
-    # On Jetson, nvidia-smi and pip-installed torch both hang.
-    # Read the device-tree model string instead (no subprocess, instant).
-    try:
-        with open("/proc/device-tree/model", "r") as f:
-            model = f.read().lower()
-        for name, arch in JETSON_ARCH.items():
-            if name in model:
-                print(f"[arch] Jetson detected via device-tree: {arch} ({model.strip()})")
-                return arch
-    except (FileNotFoundError, PermissionError):
-        pass
+    # Jetson kernels contain "tegra"; nvidia-smi and pip torch both hang there.
+    is_tegra = "tegra" in platform.release().lower()
 
-    # Desktop path: nvidia-smi (Popen with manual kill on timeout)
-    print("[arch] Not a Jetson, trying nvidia-smi...")
+    if is_tegra:
+        # Device-tree model string has a trailing null byte — read as binary
+        try:
+            with open("/proc/device-tree/model", "rb") as f:
+                model = f.read().replace(b"\x00", b"").decode("utf-8", errors="replace").lower()
+            for name, arch in JETSON_ARCH.items():
+                if name in model:
+                    print(f"[arch] Jetson detected: {arch} ({model.strip()})")
+                    return arch
+            print(f"[arch] Jetson device-tree found but unrecognized model: {model.strip()}")
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"[arch] Tegra kernel but no device-tree: {e}")
+        raise RuntimeError(
+            "Jetson detected but model unknown. Use --arch sm_XX (e.g. --arch sm_87 for Orin)."
+        )
+
+    # Desktop path: nvidia-smi
+    print("[arch] Trying nvidia-smi...")
     try:
         proc = subprocess.Popen(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
@@ -51,7 +59,10 @@ def detect_gpu_arch():
                 return arch
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
             print("[arch] nvidia-smi timed out")
     except FileNotFoundError:
         print("[arch] nvidia-smi not found")
