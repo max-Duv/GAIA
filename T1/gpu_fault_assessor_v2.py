@@ -22,8 +22,9 @@ except ImportError:
 
 class GPUFaultAssessorV2:
 
-    def __init__(self, target_gpu_index=0):
+    def __init__(self, target_gpu_index=0, arch_override=None):
         self.gpu_idx = target_gpu_index
+        self._arch_override = arch_override
         print("[assessor] Discovering INA3221 sensor nodes...")
         self.ina3221_nodes = self._discover_jetson_ina3221_nodes()
         print(f"[assessor] Found {len(self.ina3221_nodes)} INA3221 nodes")
@@ -255,17 +256,11 @@ class GPUFaultAssessorV2:
 
     def _detect_gpu_arch(self):
         """Returns the sm_XX flag for the current GPU's compute capability."""
-        try:
-            res = subprocess.run(
-                ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-            )
-            if res.returncode == 0:
-                cap = res.stdout.strip().split("\n")[0].strip()
-                return f"sm_{cap.replace('.', '')}"
-        except FileNotFoundError:
-            pass
-        raise RuntimeError("Cannot detect GPU compute capability for victim kernel compilation.")
+        if self._arch_override:
+            return self._arch_override
+
+        from controlled_3phase_runner_v2 import detect_gpu_arch
+        return detect_gpu_arch()
 
     def _compile_victim_kernel(self):
         """Compiles gpu_victim_kernel.cu with auto-detected architecture."""

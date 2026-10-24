@@ -259,7 +259,7 @@ def run_controlled_3phase_experiment(
         compile_cuda_backend(out_binary=cuda_binary, arch_override=arch_override)
 
     print("\n[init] Initializing hardware assessor...")
-    assessor = GPUFaultAssessorV2()
+    assessor = GPUFaultAssessorV2(arch_override=arch_override)
     print("[init] Assessor ready\n")
 
     phases = [
