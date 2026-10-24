@@ -24,10 +24,12 @@ class PlatformAgnosticAnomalyDetector:
     - Sliding-window Short-Time Fourier Transform (STFT) for resonant attack isolation.
     - Multi-feature Principal Component Analysis (PCA) for workload state separability.
     """
-    def __init__(self, sampling_rate_hz=20.0, buffer_len=256, gpu_idx=0):
+    def __init__(self, sampling_rate_hz=20.0, buffer_len=256, gpu_idx=0,
+                 power_anomaly_threshold_w=60.0):
         self.sampling_rate_hz = sampling_rate_hz
         self.buffer_len = buffer_len
         self.gpu_idx = gpu_idx
+        self.power_anomaly_threshold_w = power_anomaly_threshold_w
         self.power_buffer = []
         self.voltage_buffer = []
         self.time_buffer = []
@@ -137,12 +139,15 @@ class PlatformAgnosticAnomalyDetector:
             self.power_buffer.pop(0)
             self.voltage_buffer.pop(0)
 
-    def analyze_spectrum(self, threshold_db=-25.0):
+    def analyze_spectrum(self):
         """
-        Detects anomalous power spectral energy in the sub-Nyquist band.
-        At ~4 Hz telemetry sampling, this identifies power envelope
-        modulation (elevated mean, variance), not kHz-scale attack modulation.
-        Returns (is_anomalous, peak_psd_db, nyquist_hz).
+        Detect anomalous GPU power state. At ~4 Hz telemetry sampling, kHz-scale
+        attack modulation is above Nyquist and unresolvable. Detection uses mean
+        power level: attacks elevate GPU power from ~45W idle to ~84W, crossing
+        the configurable threshold (default 60W). Welch PSD is still computed as
+        a diagnostic metric for characterization.
+
+        Returns (is_anomalous, mean_power_w, nyquist_hz).
         """
         if len(self.time_buffer) >= 2:
             dt_est = (self.time_buffer[-1] - self.time_buffer[0]) / (len(self.time_buffer) - 1)
@@ -154,20 +159,11 @@ class PlatformAgnosticAnomalyDetector:
         if len(self.power_buffer) < min_samples:
             return False, 0.0, nyquist_hz
 
-        power_array = np.array(self.power_buffer) - np.mean(self.power_buffer)
-        nperseg = min(len(power_array), max(16, int(self.sampling_rate_hz * 4)))
-        freqs, psd = signal.welch(power_array, fs=self.sampling_rate_hz, nperseg=nperseg)
+        power_array = np.array(self.power_buffer)
+        mean_power = float(np.mean(power_array))
+        is_anomalous = mean_power > self.power_anomaly_threshold_w
 
-        min_freq = min(0.5, nyquist_hz * 0.3)
-        target_band = (freqs >= min_freq)
-        if not np.any(target_band):
-            return False, 0.0, nyquist_hz
-
-        max_psd_w = np.max(psd[target_band])
-        psd_db = 10 * np.log10(max_psd_w + 1e-10)
-
-        is_anomalous = psd_db > threshold_db
-        return is_anomalous, psd_db, nyquist_hz
+        return is_anomalous, mean_power, nyquist_hz
 
     def run_realtime_monitor(self, duration_sec=30.0):
         """
@@ -195,10 +191,10 @@ class PlatformAgnosticAnomalyDetector:
                 smoothed_p = self.apply_kalman_filter(raw_p)
                 self.update_buffers(t_elapsed, raw_p, raw_v)
 
-                is_attack, peak_db, nyquist_hz = self.analyze_spectrum()
+                is_attack, mean_pwr, nyquist_hz = self.analyze_spectrum()
                 state_str = "SAFE"
                 if is_attack:
-                    state_str = "!!! HAZARD !!!" if smoothed_p > 80.0 else "ANOMALY"
+                    state_str = f"!!! ATTACK ({mean_pwr:.0f}W) !!!"
 
                 print(f"{t_elapsed:<12.2f}{raw_p:<12.2f}{raw_v:<16.4f}{smoothed_p:<16.2f}{state_str:<15}")
                 time.sleep(1.0 / self.sampling_rate_hz)

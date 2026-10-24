@@ -36,6 +36,26 @@ except ImportError:
     _JTOP_AVAILABLE = False
 
 
+def _find_jetson_gpu_devfreq():
+    for node in ['gpu-gpc-0']:
+        path = f'/sys/class/devfreq/{node}'
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def _find_jetson_gpu_thermal():
+    for tz in glob.glob('/sys/class/thermal/thermal_zone*'):
+        try:
+            with open(os.path.join(tz, 'type')) as f:
+                ztype = f.read().strip().lower()
+            if 'gpu' in ztype:
+                return tz
+        except (IOError, OSError):
+            continue
+    return None
+
+
 class GPUFaultAssessorV2:
 
     def __init__(self, target_gpu_index=0, arch_override=None):
@@ -44,6 +64,13 @@ class GPUFaultAssessorV2:
         print("[assessor] Discovering INA3221 sensor nodes...")
         self.ina3221_nodes = self._discover_jetson_ina3221_nodes()
         print(f"[assessor] Found {len(self.ina3221_nodes)} INA3221 nodes")
+
+        self._devfreq_path = _find_jetson_gpu_devfreq()
+        self._thermal_path = _find_jetson_gpu_thermal()
+        if self._devfreq_path:
+            print(f"[assessor] GPU devfreq: {self._devfreq_path}")
+        if self._thermal_path:
+            print(f"[assessor] GPU thermal: {self._thermal_path}")
 
         self._nvml_handle = None
         self._has_pynvml = False
@@ -262,6 +289,20 @@ class GPUFaultAssessorV2:
                 for k in ("sm_clock_mhz", "gpu_temp_c", "sw_power_cap",
                            "hw_slowdown", "throttle_bitmask", "throttle_bitmask_raw"):
                     res.setdefault(k, 0)
+
+            if res.get("sm_clock_mhz", 0) == 0 and self._devfreq_path:
+                try:
+                    with open(os.path.join(self._devfreq_path, 'cur_freq')) as f:
+                        res["sm_clock_mhz"] = int(f.read().strip()) // 1_000_000
+                except (IOError, OSError, ValueError):
+                    pass
+
+            if res.get("gpu_temp_c", 0) == 0 and self._thermal_path:
+                try:
+                    with open(os.path.join(self._thermal_path, 'temp')) as f:
+                        res["gpu_temp_c"] = int(f.read().strip()) // 1000
+                except (IOError, OSError, ValueError):
+                    pass
 
         if jtop_data and jtop_data.get("power_w", 0) > 0:
             res = jtop_data

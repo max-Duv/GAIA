@@ -172,10 +172,10 @@ def _run_single_trial(
             detector.update_buffers(t_curr - global_start, p_w, v_meas)
             spec_result = detector.analyze_spectrum()
             is_anomalous = spec_result[0]
-            peak_db = spec_result[1]
+            mean_power_det = spec_result[1]
 
             if p_info["mitigate"] and is_anomalous and not mitigation_active:
-                print(f"    [!] Anomaly detected (PSD peak: {peak_db:.1f} dB) — applying {mitigation_label}")
+                print(f"    [!] Anomaly detected (mean power: {mean_power_det:.1f} W > {detector.power_anomaly_threshold_w:.0f} W) — applying {mitigation_label}")
                 clamp_ok = apply_mitigation()
                 if clamp_ok:
                     mitigation_active = True
@@ -247,6 +247,7 @@ def run_closed_loop_experiment(
     duration_per_phase=15.0,
     mitigation_power_cap_w=None,
     clock_cap_mhz=None,
+    detection_threshold_w=60.0,
     output_csv=None,
     gpu_idx=0,
     num_trials=5
@@ -320,7 +321,10 @@ def run_closed_loop_experiment(
 
     try:
         for trial in range(1, num_trials + 1):
-            detector = PlatformAgnosticAnomalyDetector(sampling_rate_hz=4.0)
+            detector = PlatformAgnosticAnomalyDetector(
+                sampling_rate_hz=4.0,
+                power_anomaly_threshold_w=detection_threshold_w
+            )
             records, summary = _run_single_trial(
                 trial_num=trial,
                 total_trials=num_trials,
@@ -442,6 +446,8 @@ if __name__ == "__main__":
                         help="Mitigation power cap in watts (desktop GPU, default: 70%% of current limit)")
     parser.add_argument("--clock-cap", type=float, default=None,
                         help="Mitigation clock cap in MHz (Jetson devfreq, default: 40%% of max)")
+    parser.add_argument("--det-threshold", type=float, default=60.0,
+                        help="Power anomaly detection threshold in watts (default: 60W)")
     parser.add_argument("--out", type=str, default=None, help="Output CSV path")
     parser.add_argument("--gpu", type=int, default=0, help="GPU index")
     parser.add_argument("--trials", type=int, default=5, help="Number of repeated trials (default: 5)")
@@ -451,6 +457,7 @@ if __name__ == "__main__":
         duration_per_phase=args.duration,
         mitigation_power_cap_w=args.cap,
         clock_cap_mhz=args.clock_cap,
+        detection_threshold_w=args.det_threshold,
         output_csv=args.out,
         gpu_idx=args.gpu,
         num_trials=args.trials
