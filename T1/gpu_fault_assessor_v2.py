@@ -288,16 +288,22 @@ class GPUFaultAssessorV2:
             "--elements", str(elements),
             "--inner-iters", str(inner_iters)
         ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            stdout, stderr = proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
-            raise RuntimeError("Victim kernel timed out (30s)")
-        if res.returncode != 0:
-            raise RuntimeError(f"Victim kernel execution failed:\n{res.stderr}")
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            raise RuntimeError("Victim kernel timed out (15s) — CUDA runtime may be hanging")
+        if proc.returncode != 0:
+            raise RuntimeError(f"Victim kernel execution failed:\n{stderr}")
 
-        match = re.search(r"VICTIM_LATENCY_MS:\s*([\d.]+)", res.stdout)
+        match = re.search(r"VICTIM_LATENCY_MS:\s*([\d.]+)", stdout)
         if not match:
-            raise RuntimeError(f"Could not parse victim kernel output:\n{res.stdout}")
+            raise RuntimeError(f"Could not parse victim kernel output:\n{stdout}")
 
         gpu_ms = float(match.group(1))
         return {
