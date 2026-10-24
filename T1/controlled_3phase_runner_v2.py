@@ -15,6 +15,7 @@ sys.path.insert(0, SCRIPT_DIR)
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2
 
 JETSON_ARCH = {
+    "thor": "sm_110",
     "orin": "sm_87",
     "xavier": "sm_72",
     "tx2": "sm_62",
@@ -24,26 +25,18 @@ JETSON_ARCH = {
 def detect_gpu_arch():
     print("[arch] Detecting GPU compute capability...")
 
-    # Jetson kernels contain "tegra"; nvidia-smi and pip torch both hang there.
-    is_tegra = "tegra" in platform.release().lower()
+    # Quick check: Jetson device-tree (instant, no subprocess)
+    try:
+        with open("/proc/device-tree/model", "rb") as f:
+            model = f.read().replace(b"\x00", b"").decode("utf-8", errors="replace").lower()
+        for name, arch in JETSON_ARCH.items():
+            if name in model:
+                print(f"[arch] Jetson detected via device-tree: {arch} ({model.strip()})")
+                return arch
+    except (FileNotFoundError, PermissionError):
+        pass
 
-    if is_tegra:
-        # Device-tree model string has a trailing null byte — read as binary
-        try:
-            with open("/proc/device-tree/model", "rb") as f:
-                model = f.read().replace(b"\x00", b"").decode("utf-8", errors="replace").lower()
-            for name, arch in JETSON_ARCH.items():
-                if name in model:
-                    print(f"[arch] Jetson detected: {arch} ({model.strip()})")
-                    return arch
-            print(f"[arch] Jetson device-tree found but unrecognized model: {model.strip()}")
-        except (FileNotFoundError, PermissionError) as e:
-            print(f"[arch] Tegra kernel but no device-tree: {e}")
-        raise RuntimeError(
-            "Jetson detected but model unknown. Use --arch sm_XX (e.g. --arch sm_87 for Orin)."
-        )
-
-    # Desktop path: nvidia-smi
+    # nvidia-smi (works on desktop and Thor; hangs on Orin/Xavier — timeout protects)
     print("[arch] Trying nvidia-smi...")
     try:
         proc = subprocess.Popen(
