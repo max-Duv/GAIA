@@ -269,18 +269,16 @@ class GPUFaultAssessorV2:
             raise FileNotFoundError(f"Victim kernel source not found: {src}")
 
         arch = self._detect_gpu_arch()
+        print(f"[victim] Compiling victim kernel ({arch})...")
         cmd = ["nvcc", "-O3", f"-arch={arch}", src, "-o", self._victim_binary]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"Victim kernel compilation failed:\n{res.stderr}")
 
+        print(f"[victim] Compiled: {self._victim_binary}")
         self._victim_compiled = True
 
     def _run_compiled_victim(self, elements=16777216, inner_iters=64):
-        """
-        Runs the compiled gpu_victim_kernel binary and parses CUDA-event latency.
-        Returns pure GPU-side timing with no Python dispatch overhead.
-        """
         if not self._victim_compiled:
             self._compile_victim_kernel()
 
@@ -290,7 +288,10 @@ class GPUFaultAssessorV2:
             "--elements", str(elements),
             "--inner-iters", str(inner_iters)
         ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Victim kernel timed out (30s)")
         if res.returncode != 0:
             raise RuntimeError(f"Victim kernel execution failed:\n{res.stderr}")
 
@@ -307,56 +308,72 @@ class GPUFaultAssessorV2:
             "victim_backend": "compiled_cuda_kernel"
         }
 
+    def _run_pytorch_victim(self, matrix_size=2048):
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError("PyTorch CUDA is not available.")
+
+        device = torch.device(f"cuda:{self.gpu_idx}")
+        A = torch.randn(matrix_size, matrix_size, device=device)
+        B = torch.randn(matrix_size, matrix_size, device=device)
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        t_enqueue = time.perf_counter()
+        start_event.record()
+        C = torch.matmul(A, B)
+        end_event.record()
+
+        torch.cuda.synchronize()
+        t_finish = time.perf_counter()
+
+        gpu_compute_ms = start_event.elapsed_time(end_event)
+        total_latency_ms = (t_finish - t_enqueue) * 1000.0
+        launch_delay_ms = max(total_latency_ms - gpu_compute_ms, 0.0)
+
+        return {
+            "total_latency_ms": total_latency_ms,
+            "launch_delay_ms": launch_delay_ms,
+            "gpu_compute_ms": gpu_compute_ms,
+            "checksum": float(C[0, 0].cpu()),
+            "victim_backend": "pytorch_matmul"
+        }
+
     def run_victim_workload_iteration(self, matrix_size=2048):
-        """
-        Executes a single victim workload iteration on GPU.
-        Prefers compiled CUDA victim kernel for clean GPU-side timing.
-        Falls back to PyTorch matmul if compilation is unavailable.
-        Raises RuntimeError if neither path works.
-        """
+        # Try compiled CUDA victim kernel first
         try:
-            result = self._run_compiled_victim()
-            return result
+            return self._run_compiled_victim()
         except (FileNotFoundError, RuntimeError) as e:
-            pass
+            if not hasattr(self, '_victim_error_printed'):
+                print(f"[victim] Compiled victim failed: {e}")
+                print("[victim] Falling back to PyTorch (with 10s timeout)...")
+                self._victim_error_printed = True
 
-        try:
-            import torch
-            if not torch.cuda.is_available():
-                raise RuntimeError("PyTorch CUDA is not available.")
+        # PyTorch fallback with timeout (pip torch hangs on Jetson)
+        result = [None]
+        error = [None]
+        def _try_torch():
+            try:
+                result[0] = self._run_pytorch_victim(matrix_size)
+            except Exception as e:
+                error[0] = e
+        t = threading.Thread(target=_try_torch, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        if result[0] is not None:
+            return result[0]
 
-            device = torch.device(f"cuda:{self.gpu_idx}")
-            A = torch.randn(matrix_size, matrix_size, device=device)
-            B = torch.randn(matrix_size, matrix_size, device=device)
-
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-
-            t_enqueue = time.perf_counter()
-            start_event.record()
-            C = torch.matmul(A, B)
-            end_event.record()
-
-            torch.cuda.synchronize()
-            t_finish = time.perf_counter()
-
-            gpu_compute_ms = start_event.elapsed_time(end_event)
-            total_latency_ms = (t_finish - t_enqueue) * 1000.0
-            launch_delay_ms = max(total_latency_ms - gpu_compute_ms, 0.0)
-
-            return {
-                "total_latency_ms": total_latency_ms,
-                "launch_delay_ms": launch_delay_ms,
-                "gpu_compute_ms": gpu_compute_ms,
-                "checksum": float(C[0, 0].cpu()),
-                "victim_backend": "pytorch_matmul"
-            }
-        except Exception:
-            pass
+        if t.is_alive():
+            msg = "PyTorch CUDA timed out (10s) — pip-installed torch is incompatible with Jetson."
+        elif error[0]:
+            msg = f"PyTorch failed: {error[0]}"
+        else:
+            msg = "PyTorch returned no result"
 
         raise RuntimeError(
-            "No victim workload backend available. "
-            "Requires either compiled gpu_victim_kernel (nvcc + CUDA) or PyTorch with CUDA support."
+            f"No victim workload backend available. {msg}\n"
+            "On Jetson, install torch from NVIDIA's JetPack wheels, not pip."
         )
 
     def close(self):
