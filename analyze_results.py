@@ -575,24 +575,27 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         lines.append("TASK 2: DETECTION & ANOMALY METRICS")
         lines.append("=" * 72)
 
-        label_binary = t1_df['phase'].apply(
-            lambda x: 1 if 'stress' in str(x).lower() or 'pulsed' in str(x).lower() else 0
-        ).values
         window_size = min(len(t1_df) // 10, 50)
         if window_size < 5:
             window_size = 5
 
         features, labels, trial_ids = [], [], []
-        for i in range(0, len(t1_df) - window_size, window_size):
-            sub = t1_df.iloc[i:i+window_size]
-            features.append([
-                sub['power_w'].mean(),
-                sub['power_w'].std(),
-                sub['voltage_v'].min(),
-                sub['voltage_v'].max() - sub['voltage_v'].min()
-            ])
-            labels.append(1 if label_binary[i:i+window_size].mean() > 0.5 else 0)
-            trial_ids.append(int(sub['trial'].mode().iloc[0]))
+        for trial in sorted(t1_df['trial'].unique()):
+            for phase in t1_df['phase'].unique():
+                seg = t1_df[(t1_df['trial'] == trial) & (t1_df['phase'] == phase)]
+                if len(seg) < window_size:
+                    continue
+                is_attack = 1 if 'stress' in str(phase).lower() or 'pulsed' in str(phase).lower() else 0
+                for i in range(0, len(seg) - window_size + 1, window_size):
+                    sub = seg.iloc[i:i+window_size]
+                    features.append([
+                        sub['power_w'].mean(),
+                        sub['power_w'].std(),
+                        sub['voltage_v'].min(),
+                        sub['voltage_v'].max() - sub['voltage_v'].min()
+                    ])
+                    labels.append(is_attack)
+                    trial_ids.append(int(trial))
 
         features = np.array(features)
         labels = np.array(labels)
@@ -647,10 +650,10 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
                 lines.append(f"  Recall:    {rec*100:.1f}%")
                 lines.append(f"  F1-Score:  {f1*100:.1f}%")
 
-    # --- T2 Spectral Detector Metrics (from T3 data) ---
+    # --- T2 Power-Level Detector Metrics (from T3 data) ---
     if t3_df is not None and 'anomaly_detected' in t3_df.columns:
         lines.append("\n" + "-" * 72)
-        lines.append("TASK 2b: SPECTRAL DETECTOR EVALUATION (from T3 runs)")
+        lines.append("TASK 2b: POWER-LEVEL DETECTOR EVALUATION (from T3 runs)")
         lines.append("-" * 72)
 
         for pn in t3_df['phase'].unique():
@@ -682,7 +685,7 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         spec_f1 = 2 * spec_prec * spec_rec / max(spec_prec + spec_rec, 1e-10)
         spec_acc = (tp_total + tn_total) / max(tp_total + fn_total + fp_total + tn_total, 1)
 
-        lines.append(f"\n  Spectral Detector Aggregate:")
+        lines.append(f"\n  Power-Level Detector Aggregate:")
         lines.append(f"    TP={tp_total}, FN={fn_total}, FP={fp_total}, TN={tn_total}")
         lines.append(f"    Accuracy:  {spec_acc*100:.1f}%")
         lines.append(f"    Precision: {spec_prec*100:.1f}%")

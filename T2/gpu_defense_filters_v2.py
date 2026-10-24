@@ -139,7 +139,7 @@ class PlatformAgnosticAnomalyDetector:
             self.power_buffer.pop(0)
             self.voltage_buffer.pop(0)
 
-    def analyze_spectrum(self):
+    def analyze_power_level(self):
         """
         Detect anomalous GPU power state. At ~4 Hz telemetry sampling, kHz-scale
         attack modulation is above Nyquist and unresolvable. Detection uses mean
@@ -191,7 +191,7 @@ class PlatformAgnosticAnomalyDetector:
                 smoothed_p = self.apply_kalman_filter(raw_p)
                 self.update_buffers(t_elapsed, raw_p, raw_v)
 
-                is_attack, mean_pwr, nyquist_hz = self.analyze_spectrum()
+                is_attack, mean_pwr, nyquist_hz = self.analyze_power_level()
                 state_str = "SAFE"
                 if is_attack:
                     state_str = f"!!! ATTACK ({mean_pwr:.0f}W) !!!"

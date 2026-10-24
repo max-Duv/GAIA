@@ -170,7 +170,7 @@ def _run_single_trial(
             di_dt = (curr_a - prev_current_a) / dt
 
             detector.update_buffers(t_curr - global_start, p_w, v_meas)
-            spec_result = detector.analyze_spectrum()
+            spec_result = detector.analyze_power_level()
             is_anomalous = spec_result[0]
             mean_power_det = spec_result[1]
 
