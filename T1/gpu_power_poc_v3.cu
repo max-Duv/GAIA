@@ -89,7 +89,7 @@ __global__ void modulated_compute_enemy(
     }
 }
 
-// --- KERNEL 3: L2 Scan Attack — Floods L2 with streaming data (evict_first) ---
+// --- KERNEL 3: L2 Scan Attack — Floods L2 with streaming data (bypass L1) ---
 __global__ void l2_scan_enemy(
     uint32_t *buf,
     size_t size,
@@ -107,14 +107,14 @@ __global__ void l2_scan_enemy(
             uint32_t *ptr = &buf[idx];
             uint32_t val = (uint32_t)(idx ^ k);
             asm volatile(
-                "st.global.L2::evict_first.b32 [%0], %1;"
+                "st.global.cg.b32 [%0], %1;"
                 :
                 : "l"(ptr), "r"(val)
                 : "memory"
             );
             uint32_t read_back;
             asm volatile(
-                "ld.global.L2::evict_first.b32 %0, [%1];"
+                "ld.global.cg.b32 %0, [%1];"
                 : "=r"(read_back)
                 : "l"(ptr)
                 : "memory"
@@ -128,7 +128,7 @@ __global__ void l2_scan_enemy(
     }
 }
 
-// --- KERNEL 4: L2 Pin Attack — Locks cache lines with evict_last ---
+// --- KERNEL 4: L2 Pin Attack — Saturates L2 with repeated writes (bypass L1) ---
 __global__ void l2_pin_enemy(
     uint32_t *buf,
     size_t size,
@@ -146,7 +146,7 @@ __global__ void l2_pin_enemy(
             uint32_t *ptr = &buf[idx];
             uint32_t val = (uint32_t)(t_id + k);
             asm volatile(
-                "st.global.L2::evict_last.b32 [%0], %1;"
+                "st.global.cg.b32 [%0], %1;"
                 :
                 : "l"(ptr), "r"(val)
                 : "memory"
