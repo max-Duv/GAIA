@@ -1,8 +1,9 @@
 #!/bin/bash
 # =============================================================================
 # PROJECT GAIA: Full Experiment Suite for Publication
-# Run this ON the Jetson AGX Thor as root (sudo) from the GAIA/ directory
-# Usage: sudo bash scripts/run_full_experiments.sh
+# Run this ON the Jetson AGX Thor from the GAIA/ directory (no sudo needed —
+# T3 invokes sudo internally only for nvidia-smi -pl)
+# Usage: bash scripts/run_full_experiments.sh
 # =============================================================================
 set -e
 
