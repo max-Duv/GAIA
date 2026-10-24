@@ -14,18 +14,30 @@ sys.path.insert(0, SCRIPT_DIR)
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2
 
 def detect_gpu_arch():
+    # nvidia-smi hangs on Jetson/Tegra — try it with a short timeout first
     try:
         res = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5
         )
         if res.returncode == 0:
             cap = res.stdout.strip().split("\n")[0].strip()
             return f"sm_{cap.replace('.', '')}"
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
+
+    # Fallback: use PyTorch CUDA runtime (works on Jetson Orin)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability(0)
+            return f"sm_{major}{minor}"
+    except Exception:
+        pass
+
     raise RuntimeError(
-        "Cannot detect GPU compute capability. nvidia-smi is NOT installed and a GPU is NOT visible."
+        "Cannot detect GPU compute capability. nvidia-smi timed out or is not installed, "
+        "and torch.cuda is not available."
     )
 
 
