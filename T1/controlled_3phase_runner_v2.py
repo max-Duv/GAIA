@@ -13,22 +13,30 @@ sys.path.insert(0, SCRIPT_DIR)
 
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2
 
+JETSON_ARCH = {
+    "orin": "sm_87",
+    "xavier": "sm_72",
+    "tx2": "sm_62",
+    "nano": "sm_53",
+}
+
 def detect_gpu_arch():
     print("[arch] Detecting GPU compute capability...")
 
-    # Try PyTorch first — works on both Jetson and desktop, no subprocess issues
+    # On Jetson, nvidia-smi and pip-installed torch both hang.
+    # Read the device-tree model string instead (no subprocess, instant).
     try:
-        import torch
-        if torch.cuda.is_available():
-            major, minor = torch.cuda.get_device_capability(0)
-            arch = f"sm_{major}{minor}"
-            print(f"[arch] Detected via torch.cuda: {arch} ({torch.cuda.get_device_name(0)})")
-            return arch
-    except Exception:
+        with open("/proc/device-tree/model", "r") as f:
+            model = f.read().lower()
+        for name, arch in JETSON_ARCH.items():
+            if name in model:
+                print(f"[arch] Jetson detected via device-tree: {arch} ({model.strip()})")
+                return arch
+    except (FileNotFoundError, PermissionError):
         pass
 
-    # Fallback: nvidia-smi (hangs on Jetson, so use Popen with manual kill)
-    print("[arch] torch.cuda unavailable, trying nvidia-smi...")
+    # Desktop path: nvidia-smi (Popen with manual kill on timeout)
+    print("[arch] Not a Jetson, trying nvidia-smi...")
     try:
         proc = subprocess.Popen(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
@@ -44,17 +52,16 @@ def detect_gpu_arch():
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            print("[arch] nvidia-smi timed out (expected on Jetson)")
+            print("[arch] nvidia-smi timed out")
     except FileNotFoundError:
         print("[arch] nvidia-smi not found")
 
     raise RuntimeError(
-        "Cannot detect GPU compute capability. torch.cuda is not available "
-        "and nvidia-smi timed out or is not installed."
+        "Cannot detect GPU compute capability. Use --arch sm_XX to specify manually."
     )
 
 
-def compile_cuda_backend(src_path=None, out_binary=None):
+def compile_cuda_backend(src_path=None, out_binary=None, arch_override=None):
     if src_path is None:
         src_path = os.path.join(SCRIPT_DIR, "gpu_power_poc_v3.cu")
     if out_binary is None:
@@ -63,7 +70,11 @@ def compile_cuda_backend(src_path=None, out_binary=None):
     if not os.path.exists(src_path):
         raise FileNotFoundError(f"CUDA source file not found: {src_path}")
 
-    arch = detect_gpu_arch()
+    if arch_override:
+        arch = arch_override
+        print(f"[arch] Using --arch override: {arch}")
+    else:
+        arch = detect_gpu_arch()
     print(f"GPU architecture: {arch}")
 
     nvcc_cmd = ["nvcc", "-O3", f"-arch={arch}", src_path, "-o", out_binary, "-lcuda"]
@@ -206,7 +217,8 @@ def run_controlled_3phase_experiment(
     duration_per_phase=15.0,
     output_csv=None,
     sweep_mechanism=False,
-    num_trials=10
+    num_trials=10,
+    arch_override=None
 ):
     """
     Executes a controlled 3-condition experiment with repeated trials for statistical rigor.
@@ -233,7 +245,7 @@ def run_controlled_3phase_experiment(
     print("=====================================================================")
 
     if not os.path.exists(cuda_binary):
-        compile_cuda_backend(out_binary=cuda_binary)
+        compile_cuda_backend(out_binary=cuda_binary, arch_override=arch_override)
 
     assessor = GPUFaultAssessorV2()
 
@@ -378,11 +390,13 @@ if __name__ == "__main__":
     parser.add_argument("--out", type=str, default=None, help="Output CSV path (default: alongside this script)")
     parser.add_argument("--sweep", action="store_true", help="Include launch-duration sweep for DAC Fig 6")
     parser.add_argument("--trials", type=int, default=10, help="Number of recorded trials (default: 10)")
+    parser.add_argument("--arch", type=str, default=None, help="GPU arch override, e.g. sm_87 for Jetson Orin (skips detection)")
     args = parser.parse_args()
 
     run_controlled_3phase_experiment(
         duration_per_phase=args.duration,
         output_csv=args.out,
         sweep_mechanism=args.sweep,
-        num_trials=args.trials
+        num_trials=args.trials,
+        arch_override=args.arch
     )
