@@ -14,30 +14,43 @@ sys.path.insert(0, SCRIPT_DIR)
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2
 
 def detect_gpu_arch():
-    # nvidia-smi hangs on Jetson/Tegra — try it with a short timeout first
-    try:
-        res = subprocess.run(
-            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5
-        )
-        if res.returncode == 0:
-            cap = res.stdout.strip().split("\n")[0].strip()
-            return f"sm_{cap.replace('.', '')}"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    print("[arch] Detecting GPU compute capability...")
 
-    # Fallback: use PyTorch CUDA runtime (works on Jetson Orin)
+    # Try PyTorch first — works on both Jetson and desktop, no subprocess issues
     try:
         import torch
         if torch.cuda.is_available():
             major, minor = torch.cuda.get_device_capability(0)
-            return f"sm_{major}{minor}"
+            arch = f"sm_{major}{minor}"
+            print(f"[arch] Detected via torch.cuda: {arch} ({torch.cuda.get_device_name(0)})")
+            return arch
     except Exception:
         pass
 
+    # Fallback: nvidia-smi (hangs on Jetson, so use Popen with manual kill)
+    print("[arch] torch.cuda unavailable, trying nvidia-smi...")
+    try:
+        proc = subprocess.Popen(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        try:
+            stdout, _ = proc.communicate(timeout=5)
+            if proc.returncode == 0:
+                cap = stdout.strip().split("\n")[0].strip()
+                arch = f"sm_{cap.replace('.', '')}"
+                print(f"[arch] Detected via nvidia-smi: {arch}")
+                return arch
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            print("[arch] nvidia-smi timed out (expected on Jetson)")
+    except FileNotFoundError:
+        print("[arch] nvidia-smi not found")
+
     raise RuntimeError(
-        "Cannot detect GPU compute capability. nvidia-smi timed out or is not installed, "
-        "and torch.cuda is not available."
+        "Cannot detect GPU compute capability. torch.cuda is not available "
+        "and nvidia-smi timed out or is not installed."
     )
 
 
