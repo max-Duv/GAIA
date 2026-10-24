@@ -200,7 +200,9 @@ int main(int argc, char* argv[]) {
     CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
     std::cout << "Target Hardware GPU: " << prop.name << "\n";
     std::cout << "SM Count: " << prop.multiProcessorCount << "\n";
-    std::cout << "Peak Clock Rate: " << prop.clockRate / 1000.0f << " MHz\n\n";
+    int clock_rate_khz = 0;
+    cudaDeviceGetAttribute(&clock_rate_khz, cudaDevAttrClockRate, device);
+    std::cout << "Peak Clock Rate: " << clock_rate_khz / 1000.0f << " MHz\n\n";
 
     if ((mode == "pin" || mode == "scan") && prop.major < 8) {
         std::cerr << "[-] Pin/scan modes require sm_80+ (Ampere or later). "
@@ -208,7 +210,7 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    double clock_hz = prop.clockRate * 1e3; // clockRate in kHz
+    double clock_hz = clock_rate_khz * 1e3;
     double period_s = 1.0 / (freq_khz * 1e3);
     unsigned long long active_cycles = (unsigned long long)(period_s * duty_cycle * clock_hz);
     unsigned long long idle_cycles = (unsigned long long)(period_s * (1.0f - duty_cycle) * clock_hz);
