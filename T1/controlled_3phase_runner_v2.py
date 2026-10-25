@@ -109,7 +109,7 @@ def significance_stars(p_value):
 
 def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
                      trial_label, randomize_order=False, victim_fn=None,
-                     temp_sync_log=None):
+                     temp_sync_log=None, experiment_meta=None):
     """Run one complete trial through all phases.
 
     Args:
@@ -117,6 +117,8 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
             Falls back to assessor.run_victim_workload_iteration().
         temp_sync_log: if a list, full thermal-sync metadata is appended
             per temp-sync phase (all readings, timestamps, trigger info).
+        experiment_meta: dict of experiment-level metadata (victim_type,
+            seed, etc.) included in each temp_sync_log entry.
     """
     records = []
     phase_summaries = {}
@@ -173,10 +175,13 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
             except subprocess.TimeoutExpired:
                 preheat_proc.kill()
             heated_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
+            preheat_end = time.time()
             print(f"    [temp-sync] Post-heat temp: {heated_temp:.3f}C")
 
             print(f"    [temp-sync] Phase 2: Cooling (3s idle)...")
+            cooldown_start = time.time()
             time.sleep(3)
+            cooldown_end = time.time()
             cooled_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
             print(f"    [temp-sync] Post-cool temp: {cooled_temp:.3f}C (dropped {heated_temp - cooled_temp:.3f}C)")
 
@@ -217,13 +222,19 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
                 "trial": trial_label,
                 "phase": p_name,
                 "preheat_start_s": round(preheat_start - trial_start, 3),
+                "preheat_end_s": round(preheat_end - trial_start, 3),
                 "heated_temp_c": heated_temp,
+                "cooldown_start_s": round(cooldown_start - trial_start, 3),
+                "cooldown_end_s": round(cooldown_end - trial_start, 3),
                 "cooled_temp_c": cooled_temp,
+                "watch_start_s": round(sync_start - trial_start, 3),
                 "trigger": temp_sync_trigger,
                 "detection_delay_s": round(time.time() - sync_start, 3),
                 "run_victim": run_victim,
                 "temp_trace": [(round(t, 4), round(v, 4)) for t, v in temp_trace],
             }
+            if experiment_meta:
+                temp_sync_data["experiment_meta"] = experiment_meta
             if temp_sync_log is not None:
                 temp_sync_log.append(temp_sync_data)
 
@@ -444,6 +455,13 @@ def run_controlled_3phase_experiment(
     per_phase_trial_means = {}
     temp_sync_log = []
 
+    experiment_meta = {
+        "victim_type": victim_type,
+        "seed": seed,
+        "num_trials": num_trials,
+        "duration_per_phase": duration_per_phase,
+    }
+
     for phase in phases:
         per_phase_trial_means[phase["name"]] = []
 
@@ -457,6 +475,7 @@ def run_controlled_3phase_experiment(
             randomize_order=randomize_order,
             victim_fn=victim_fn,
             temp_sync_log=temp_sync_log,
+            experiment_meta=experiment_meta,
         )
 
         for r in records:
@@ -470,7 +489,8 @@ def run_controlled_3phase_experiment(
             all_trial_summaries.append(row)
 
     if temp_sync_log:
-        ts_path = os.path.join(output_dir, "temp_sync_log.json")
+        csv_stem = os.path.splitext(os.path.basename(output_csv))[0]
+        ts_path = os.path.join(output_dir, f"{csv_stem}_temp_sync.json")
         with open(ts_path, "w") as f:
             json.dump(temp_sync_log, f, indent=2)
         print(f"[+] Temp-sync trace log saved to: {ts_path}")
