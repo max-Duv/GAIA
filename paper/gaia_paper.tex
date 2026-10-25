@@ -12,7 +12,7 @@
 
 \sisetup{detect-weight=true, detect-family=true}
 
-\graphicspath{{../results_20261024_195326/figures/}}
+\graphicspath{{../results_20261025_004301/figures/}}
 
 \begin{document}
 
@@ -34,22 +34,23 @@ In Thrust~1, we design and characterize six adversarial workload
 conditions---sustained cache-eviction stress, compute-only saturation,
 10\,kHz pulsed attacks, a temperature-synchronized variant, and their
 baselines---across 10 randomized trials.  Attacks elevate module-rail
-power from 45\,W (idle) to 89\,W (sustained stress) while,
+power from 46\,W (idle) to 90\,W (sustained stress) while,
 paradoxically, \emph{reducing} co-located victim latency from
-1.45\,ms to 1.20\,ms due to GPU clock boosting.
+1.48\,ms to 1.20\,ms due to GPU clock boosting.
 In Thrust~2, we evaluate two detection mechanisms:
-a power-level threshold detector (100\% precision, 72.4\% recall,
+a power-level threshold detector (100\% precision, 63.5\% recall,
 0\% false-positive rate, 4.3\,s mean detection latency) and a
 logistic-regression classifier over windowed telemetry features
-(88.0\% accuracy, 84.2\% F1 via leave-one-trial-out cross-validation),
+(89.8\% accuracy, 90.6\% F1 via leave-one-trial-out cross-validation),
 supplemented by Welch PSD spectral characterization and GPU
 performance-counter analysis.
 In Thrust~3, we close the loop with two mitigation strategies:
-devfreq-based clock capping (18.4\% power reduction, 3.3$\times$
-latency cost) and graceful adversarial-kernel termination, integrated
+devfreq-based clock capping (17.7\% power reduction, 3.3$\times$
+latency cost) and graceful adversarial-kernel termination (33.5\,W
+power recovery), integrated
 with a Prometheus-compatible telemetry exporter for industry-standard
 monitoring.  All pairwise comparisons are statistically significant
-($p < 0.001$, Cohen's $d > 1.6$).  Our results demonstrate that
+($p < 0.001$, Cohen's $d > 5.0$).  Our results demonstrate that
 user-level GPU adversarial kernels measurably manipulate server power,
 that low-overhead telemetry can detect them with zero false positives,
 and that dynamic clock management and process termination provide
@@ -288,12 +289,13 @@ power, temperature, clock, voltage, utilization, and anomaly status.
 
 Table~\ref{tab:t1} summarizes the results across all six conditions.
 All attack conditions significantly elevate GPU module-rail power
-above the 45.5\,W baseline.  Sustained stress produces the highest
-mean power at 88.8\,W ($1.95\times$ baseline), followed by pulsed
-stress at 84.0\,W and cache-only at 83.6\,W.  Compute-only stress
-elevates power to 61.3\,W ($1.35\times$ baseline), confirming that
+above the 46.0\,W baseline.  Sustained stress produces the highest
+mean power at 89.6\,W ($1.95\times$ baseline), followed by pulsed
+stress at 84.8\,W, cache-only at 84.6\,W, and the
+temperature-synchronized variant at 84.6\,W.  Compute-only stress
+elevates power to 61.3\,W ($1.33\times$ baseline), confirming that
 cache-eviction is the dominant power-draw mechanism.  Peak
-instantaneous power reaches 103.0\,W (79.2\% of the 130\,W TDP).
+instantaneous power reaches 103.8\,W (79.8\% of the 130\,W TDP).
 
 All pairwise comparisons are statistically significant by paired
 $t$-test ($p < 0.001$ for all pairs, $|\text{Cohen's } d| > 1.6$;
@@ -317,12 +319,12 @@ All comparisons significant at $p < 0.001$.}
 \toprule
 Comparison & $t$ & $p$ & Cohen's $d$ \\
 \midrule
-Pulsed vs.\ Alone & $14.21$ & $<0.001$ & $6.24$ \\
-Sustained vs.\ Alone & $13.94$ & $<0.001$ & $6.17$ \\
-Cache vs.\ Alone & $-13.50$ & $<0.001$ & $-6.08$ \\
-Compute vs.\ Alone & $13.01$ & $<0.001$ & $5.80$ \\
-Pulsed vs.\ Sustained & $-4.99$ & $<0.001$ & $-1.67$ \\
-Cache vs.\ Compute & $-18.97$ & $<0.001$ & $-7.23$ \\
+Pulsed vs.\ Alone & $12.36$ & $<0.001$ & $5.48$ \\
+Sustained vs.\ Alone & $12.11$ & $<0.001$ & $5.43$ \\
+Cache vs.\ Alone & $12.03$ & $<0.001$ & $5.36$ \\
+Compute vs.\ Alone & $11.52$ & $<0.001$ & $5.17$ \\
+Temp-Sync vs.\ Alone & $12.25$ & $<0.001$ & $5.49$ \\
+Cache vs.\ Compute & $13.37$ & $<0.001$ & $6.14$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -331,10 +333,10 @@ Cache vs.\ Compute & $-18.97$ & $<0.001$ & $-7.23$ \\
 
 A counterintuitive finding is that the victim kernel runs
 \emph{faster} under attack: 1.20\,ms (all attack conditions)
-versus 1.45\,ms when alone.  GPU telemetry reveals the mechanism:
+versus 1.48\,ms when alone.  GPU telemetry reveals the mechanism:
 under load from the co-located adversary, the GPU's dynamic
 voltage--frequency scaling (DVFS) boosts the clock from a variable
-$1310 \pm 216$\,MHz (victim alone, with idle periods triggering
+$1287 \pm 236$\,MHz (victim alone, with idle periods triggering
 downclocking) to a sustained 1575\,MHz (all attack conditions).
 The victim benefits from this higher clock despite sharing the GPU.
 
@@ -342,7 +344,7 @@ This has an important security implication: \emph{latency degradation
 alone is not a reliable indicator of a co-located power attack on
 modern GPUs with aggressive DVFS.}  The attack's impact is on power
 draw and thermal state, not necessarily on execution time.
-Temperature rises from 44.3\,$^\circ$C (alone) to 47.7\,$^\circ$C
+Temperature rises from 47.4\,$^\circ$C (alone) to 50.6\,$^\circ$C
 (sustained stress).
 
 \subsection{Mechanism Isolation}
@@ -372,12 +374,15 @@ power injection by tuning the active/idle ratio.
 
 The threshold detector ($\theta = 60$\,W) achieves the results shown
 in Table~\ref{tab:t2_det}.  The detector achieves zero false positives
-across 571 benign telemetry samples, with 100\% precision.  Recall is
-72.4\% (394/544 attack samples detected), limited by the 4.3-second
+across 568 benign telemetry samples, with 100\% precision.  Recall is
+63.5\% (521/821 attack samples detected), limited by the 4.3-second
 mean detection latency: the first several seconds of each attack phase
 are below threshold as the detector's sliding window fills with
-attack-level samples.  Once the buffer is primed, detection is
-reliable for the remainder of the phase.
+attack-level samples.  The \emph{attack\_terminated} phase has the
+lowest TPR (46.4\%) because the adversarial process is killed
+mid-phase, causing power to drop below threshold for the remaining
+samples.  Once the buffer is primed, detection is reliable for
+the remainder of the phase.
 
 \begin{table}[t]
 \centering
@@ -388,15 +393,16 @@ reliable for the remainder of the phase.
 \toprule
 Phase & Samples & Detected & Rate \\
 \midrule
-Attack (unmitigated) & 267 & 192 & TPR = 71.9\% \\
-Attack (mitigated)   & 277 & 202 & TPR = 72.9\% \\
-Clamped baseline     & 280 &   0 & FPR = 0.0\% \\
-Recovery baseline    & 291 &   0 & FPR = 0.0\% \\
+Attack (unmitigated)  & 266 & 191 & TPR = 71.8\% \\
+Attack (mitigated)    & 275 & 200 & TPR = 72.7\% \\
+Attack (terminated)   & 280 & 130 & TPR = 46.4\% \\
+Clamped baseline      & 278 &   0 & FPR = 0.0\% \\
+Recovery baseline     & 290 &   0 & FPR = 0.0\% \\
 \midrule
-\textbf{Aggregate} & \textbf{1115} & --- & --- \\
+\textbf{Aggregate} & \textbf{1389} & --- & --- \\
 \quad Precision & & & 100.0\% \\
-\quad Recall    & & & 72.4\% \\
-\quad F1-Score  & & & 84.0\% \\
+\quad Recall    & & & 63.5\% \\
+\quad F1-Score  & & & 77.6\% \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -406,8 +412,8 @@ Recovery baseline    & 291 &   0 & FPR = 0.0\% \\
 Principal component analysis on the four-feature windows (mean power,
 power std, voltage min, voltage range) shows strong separability
 between benign and attack workloads.  The first two principal
-components capture 84.5\% of the total variance (PC1: 62.7\%, PC2:
-21.8\%), indicating that the power-telemetry feature space
+components capture 85.8\% of the total variance (PC1: 71.0\%, PC2:
+14.9\%), indicating that the power-telemetry feature space
 provides a low-dimensional manifold on which attack and benign states
 are well separated.
 
@@ -415,8 +421,8 @@ are well separated.
 
 The logistic regression classifier, evaluated via leave-one-trial-out
 cross-validation with per-fold standardization, achieves:
-accuracy 88.0\%, precision 88.9\%, recall 80.0\%, F1-score 84.2\%
-across 50 windows (30 benign, 20 attack) drawn from 10 held-out
+accuracy 89.8\%, precision 82.9\%, recall 100.0\%, F1-score 90.6\%
+across 59 windows (30 benign, 29 attack) drawn from 10 held-out
 trials.  Windows are constructed within each (trial, phase) pair
 to prevent information leakage across trial or phase boundaries.
 
@@ -465,7 +471,7 @@ originally proposed would become viable.
 
 Table~\ref{tab:t3} shows the four-phase mitigation results across
 5 trials.  The devfreq clock cap ($1575 \to 630$\,MHz) reduces
-attack-phase power by 18.4\% (83.8\,W $\to$ 68.4\,W), confirming
+attack-phase power by 17.7\% (84.2\,W $\to$ 69.3\,W), confirming
 that GPU clock management is an effective lever for power reduction
 under adversarial load.
 
@@ -480,21 +486,21 @@ under adversarial load.
 \subsection{Latency--Power Tradeoff}
 
 The mitigation introduces a significant latency penalty.  Victim
-latency increases from 1.20\,ms (unmitigated attack) to 3.94\,ms
+latency increases from 1.20\,ms (unmitigated attack) to 3.93\,ms
 (mitigated attack), a $3.3\times$ increase.  However, a portion of
 this latency increase is inherent to the clock cap itself:
 \emph{victim\_clamped\_baseline} (no attack, clock capped) shows
-2.97\,ms latency---a 1.51\,ms overhead versus the 1.46\,ms recovery
+2.91\,ms latency---a 1.44\,ms overhead versus the 1.47\,ms recovery
 baseline.  The decomposition is:
 
 \begin{align}
-\text{Gross latency change} &= B - A = 3.94 - 1.20 = +2.75\,\text{ms} \\
-\text{Clamping overhead} &= C - D = 2.97 - 1.46 = +1.51\,\text{ms} \\
-\text{Net attack effect} &= (B-A) - (C-D) = +1.24\,\text{ms}
+\text{Gross latency change} &= B - A = 3.93 - 1.20 = +2.73\,\text{ms} \\
+\text{Clamping overhead} &= C - D = 2.91 - 1.47 = +1.44\,\text{ms} \\
+\text{Net attack effect} &= (B-A) - (C-D) = +1.29\,\text{ms}
 \end{align}
 
 The paired $t$-test between unmitigated and mitigated attack latency
-is significant ($t = -563.0$, $p < 0.001$), confirming that the
+is significant ($t = -3345$, $p < 0.001$), confirming that the
 power reduction is achieved at a measurable performance cost.
 
 \subsection{Detection-to-Mitigation Latency}
@@ -514,11 +520,13 @@ response: upon detecting the power anomaly, the system kills the
 adversarial process, eliminating the attack entirely.  Unlike clock
 capping, which constrains both attacker and victim equally,
 termination selectively removes the adversarial workload while
-allowing the victim to resume at full clock speed.  The
-\emph{attack\_terminated} phase demonstrates that power returns to
-baseline levels within one telemetry cycle after kill, with victim
-latency recovering to pre-attack values.  This approach is more
-suitable when the adversarial process can be identified and isolated.
+allowing the victim to resume at full clock speed.  Across 5 trials,
+pre-kill power averages 80.6\,W, dropping to 47.0\,W post-kill---a
+33.5\,W recovery.  Victim latency shifts from 1.20\,ms (under attack)
+to 1.35\,ms (post-kill), close to the 1.47\,ms recovery baseline,
+confirming that the victim resumes normal operation.  This approach is
+more suitable when the adversarial process can be identified and
+isolated.
 
 \subsection{Prometheus Integration}
 
@@ -544,31 +552,32 @@ Our results address the three questions posed by the GAIA proposal:
 \textbf{Can user-level GPU workloads measurably manipulate server
 power?}  Yes.  All five attack conditions elevate module-rail power
 significantly above baseline, with sustained stress reaching
-$1.95\times$ the idle power level.  Peak power (103\,W) reaches
-79\% of TDP.  The temperature-synchronized variant demonstrates that
+$1.95\times$ the idle power level.  Peak power (103.8\,W) reaches
+79.8\% of TDP.  The temperature-synchronized variant demonstrates that
 an attacker can use GPU thermal readings as a user-level side channel
 to time attack launch to victim computation, without requiring any
-privileged access.  The voltage drop, while small on the module rail
-(8\,mV), would compound across hundreds of GPUs in a data center
-rack.
+privileged access---the pre-heat trigger succeeded in 10/10 trials
+using millidegree-precision thermal zone readings.  The voltage drop,
+while small on the module rail (8\,mV), would compound across hundreds
+of GPUs in a data center rack.
 
 \textbf{Can low-overhead telemetry detect these attacks?}  Yes, with
 caveats.  The power-level threshold detector achieves zero false
 positives and 100\% precision, making it suitable for deployment
-where false alarms are costly.  The 72.4\% recall and 4.3\,s
+where false alarms are costly.  The 63.5\% recall and 4.3\,s
 detection latency are acceptable for a first-response system, though
 insufficient for latency-critical applications.  The logistic
-regression classifier (88\% accuracy) demonstrates that simple
+regression classifier (89.8\% accuracy, 90.6\% F1) demonstrates that simple
 ML models over power telemetry features can distinguish attack from
 benign workloads with moderate accuracy.
 
 \textbf{Can mitigation be applied in real time?}  Yes, via two
 complementary strategies.  Devfreq clock capping reduces power by
-18.4\% with a 3.3$\times$ latency cost, representing the
+17.7\% with a 3.3$\times$ latency cost, representing the
 fundamental tradeoff between power security and compute performance.
 Graceful kernel termination provides a more targeted response by
-eliminating the adversarial process, allowing the victim to resume at
-full performance.  The Prometheus telemetry exporter enables
+eliminating the adversarial process with a 33.5\,W power recovery,
+allowing the victim to resume at full performance.  The Prometheus telemetry exporter enables
 integration with industry-standard monitoring stacks for production
 deployment.
 
@@ -682,11 +691,12 @@ kernels---including temperature-synchronized variants---elevate GPU
 power by up to $1.95\times$ baseline without triggering hardware
 throttling, and paradoxically improve victim performance through
 clock boosting.  A power-level threshold detector achieves zero
-false positives with 72.4\% recall, supplemented by spectral
-characterization and performance-counter analysis.  Two closed-loop
-mitigation strategies---devfreq clock capping (18.4\% power
+false positives with 63.5\% recall, supplemented by a logistic
+regression classifier (89.8\% accuracy, 90.6\% F1), spectral
+characterization, and performance-counter analysis.  Two closed-loop
+mitigation strategies---devfreq clock capping (17.7\% power
 reduction, $3.3\times$ latency cost) and graceful adversarial-kernel
-termination---demonstrate complementary tradeoffs for real-time
+termination (33.5\,W recovery)---demonstrate complementary tradeoffs for real-time
 response, integrated with a Prometheus-compatible telemetry exporter
 for industry-standard monitoring.
 

@@ -2,12 +2,112 @@ import os
 import re
 import sys
 import time
+import json
 import glob
 import subprocess
 import threading
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _EXE = ".exe" if sys.platform == "win32" else ""
+
+
+CONDITION_LABELS = {
+    "victim_alone":              {"is_attack": False, "category": "baseline"},
+    "victim_sustained_stress":   {"is_attack": True,  "category": "attack_sustained"},
+    "victim_cache_only":         {"is_attack": True,  "category": "attack_cache"},
+    "victim_compute_only":       {"is_attack": True,  "category": "attack_compute"},
+    "victim_pulsed_stress":      {"is_attack": True,  "category": "attack_pulsed"},
+    "victim_temp_sync_stress":   {"is_attack": True,  "category": "attack_tempsync"},
+    "victim_occupancy_stress":   {"is_attack": True,  "category": "attack_occupancy"},
+    "victim_legit_highpower":    {"is_attack": False, "category": "benign_highpower"},
+    "temp_sync_control_novictim": {"is_attack": False, "category": "control_tempsync"},
+    "temp_sync_randomized_delay": {"is_attack": True,  "category": "control_tempsync_random"},
+    "attack_unmitigated":        {"is_attack": True,  "category": "t3_attack"},
+    "attack_mitigated":          {"is_attack": True,  "category": "t3_attack"},
+    "attack_terminated":         {"is_attack": True,  "category": "t3_attack"},
+    "victim_clamped_baseline":   {"is_attack": False, "category": "t3_baseline"},
+    "recovery_baseline":         {"is_attack": False, "category": "t3_baseline"},
+}
+
+
+def collect_platform_info():
+    """Collect reproducibility-critical platform metadata."""
+    info = {
+        "collection_time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "platform": sys.platform,
+        "python_version": sys.version,
+    }
+
+    try:
+        with open("/proc/device-tree/model", "rb") as f:
+            info["device_model"] = f.read().replace(b"\x00", b"").decode("utf-8", errors="replace").strip()
+    except (FileNotFoundError, PermissionError):
+        info["device_model"] = "unknown"
+
+    for cmd_name, cmd in [
+        ("nvcc_version", ["nvcc", "--version"]),
+        ("nvidia_driver", ["cat", "/proc/driver/nvidia/version"]),
+    ]:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                info[cmd_name] = r.stdout.strip()
+        except Exception:
+            pass
+
+    try:
+        r = subprocess.run(["nvpmodel", "-q"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            info["power_mode"] = r.stdout.strip()
+    except Exception:
+        info["power_mode"] = "unknown (nvpmodel not available)"
+
+    for path, key in [
+        ("/sys/devices/pwm-fan/target_pwm", "fan_target_pwm"),
+        ("/sys/devices/pwm-fan/cur_pwm", "fan_current_pwm"),
+    ]:
+        try:
+            with open(path) as f:
+                info[key] = f.read().strip()
+        except (FileNotFoundError, PermissionError):
+            pass
+
+    devfreq = _find_jetson_gpu_devfreq()
+    if devfreq:
+        for attr in ["governor", "max_freq", "min_freq", "cur_freq", "available_frequencies"]:
+            try:
+                with open(os.path.join(devfreq, attr)) as f:
+                    info[f"devfreq_{attr}"] = f.read().strip()
+            except (FileNotFoundError, PermissionError):
+                pass
+
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=os.path.dirname(SCRIPT_DIR)
+        )
+        if r.returncode == 0:
+            info["git_revision"] = r.stdout.strip()
+    except Exception:
+        pass
+
+    try:
+        import torch
+        info["pytorch_version"] = torch.__version__
+        info["pytorch_cuda_version"] = torch.version.cuda or "N/A"
+    except ImportError:
+        pass
+
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        info["nvml_driver_version"] = pynvml.nvmlSystemGetDriverVersion()
+        info["nvml_cuda_version"] = str(pynvml.nvmlSystemGetCudaDriverVersion_v2())
+    except Exception:
+        pass
+
+    return info
 
 
 def _cuda_subprocess_env():
@@ -115,6 +215,7 @@ class GPUFaultAssessorV2:
 
     def _discover_jetson_ina3221_nodes(self):
         nodes = {}
+        self._rail_identities = {}
         hwmon_paths = glob.glob("/sys/class/hwmon/hwmon*")
 
         for h_path in hwmon_paths:
@@ -129,16 +230,33 @@ class GPUFaultAssessorV2:
 
             if "ina3221" in drv_name.lower() or "jetson" in drv_name.lower() or "i2c" in h_path:
                 for i in range(1, 4):
+                    label_file = os.path.join(h_path, f"in{i}_label")
+                    rail_label = f"rail_{i}"
+                    if os.path.exists(label_file):
+                        try:
+                            with open(label_file) as f:
+                                rail_label = f.read().strip()
+                        except Exception:
+                            pass
+
                     in_file = os.path.join(h_path, f"in{i}_input")
                     curr_file = os.path.join(h_path, f"curr{i}_input")
                     power_file = os.path.join(h_path, f"power{i}_input")
 
+                    key_prefix = f"rail_{i}"
+                    self._rail_identities[key_prefix] = {
+                        "hwmon": os.path.basename(h_path),
+                        "driver": drv_name,
+                        "label": rail_label,
+                        "channel": i,
+                    }
+
                     if os.path.exists(in_file):
-                        nodes[f"rail_{i}_voltage_sysfs"] = in_file
+                        nodes[f"{key_prefix}_voltage_sysfs"] = in_file
                     if os.path.exists(curr_file):
-                        nodes[f"rail_{i}_current_sysfs"] = curr_file
+                        nodes[f"{key_prefix}_current_sysfs"] = curr_file
                     if os.path.exists(power_file):
-                        nodes[f"rail_{i}_power_sysfs"] = power_file
+                        nodes[f"{key_prefix}_power_sysfs"] = power_file
 
         return nodes
 
@@ -259,8 +377,8 @@ class GPUFaultAssessorV2:
             result["gpu_util_pct"] = util.gpu
             result["mem_util_pct"] = util.memory
         except pynvml.NVMLError:
-            result["gpu_util_pct"] = 0
-            result["mem_util_pct"] = 0
+            result["gpu_util_pct"] = None
+            result["mem_util_pct"] = None
 
         try:
             raw = pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(handle)

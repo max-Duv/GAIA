@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 import subprocess
 import csv
 import argparse
@@ -14,7 +15,7 @@ sys.path.insert(0, os.path.join(PARENT_DIR, "T2"))
 
 _EXE = ".exe" if sys.platform == "win32" else ""
 
-from gpu_fault_assessor_v2 import GPUFaultAssessorV2
+from gpu_fault_assessor_v2 import GPUFaultAssessorV2, CONDITION_LABELS, collect_platform_info
 from gpu_defense_filters_v2 import PlatformAgnosticAnomalyDetector
 
 
@@ -135,6 +136,14 @@ def _run_single_trial(
         mitigation_active = False
         mitigation_trigger_count = 0
         termination_time = None
+        stress_start_ts = None
+        stress_stop_ts = None
+        mitigation_start_ts = None
+        mitigation_stop_ts = None
+        adversary_pid = None
+        label_info = CONDITION_LABELS.get(p_name, {"is_attack": p_info["run_stress"],
+                                                    "category": "unknown"})
+        is_attack = int(label_info["is_attack"])
 
         if p_info.get("force_clamp"):
             print(f"    [+] Applying clamped {mitigation_label}")
@@ -145,7 +154,9 @@ def _run_single_trial(
                 cuda_proc = subprocess.Popen(
                     stress_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
                 )
-                print(f"    [+] Stress process launched (PID: {cuda_proc.pid})")
+                stress_start_ts = time.time()
+                adversary_pid = cuda_proc.pid
+                print(f"    [+] Stress process launched (PID: {adversary_pid})")
                 time.sleep(0.5)
             except Exception as e:
                 raise RuntimeError(f"Failed to launch stress process: {e}")
@@ -176,11 +187,15 @@ def _run_single_trial(
             mean_power_det = spec_result[1]
 
             if p_info["mitigate"] and is_anomalous and not mitigation_active:
+                detect_ts = time.time()
                 print(f"    [!] Anomaly detected (mean power: {mean_power_det:.1f} W > {detector.power_anomaly_threshold_w:.0f} W) — applying {mitigation_label}")
                 clamp_ok = apply_mitigation()
+                mitigation_latency = time.time() - detect_ts
                 if clamp_ok:
                     mitigation_active = True
+                    mitigation_start_ts = detect_ts
                     mitigation_trigger_count += 1
+                    print(f"    [+] Mitigation applied in {mitigation_latency*1000:.1f}ms")
                 else:
                     print(f"    [!] Mitigation clamp FAILED")
 
@@ -213,6 +228,8 @@ def _run_single_trial(
                 "trial": trial_num,
                 "timestamp": round(t_curr - global_start, 4),
                 "phase": p_name,
+                "is_attack": is_attack,
+                "category": label_info["category"],
                 "data_source": hw["provenance"],
                 "power_w": round(p_w, 3),
                 "voltage_v": round(v_meas, 5),
@@ -224,12 +241,16 @@ def _run_single_trial(
                 "mitigation_active": int(mitigation_active),
                 "sm_clock_mhz": hw.get("sm_clock_mhz", 0),
                 "gpu_temp_c": hw.get("gpu_temp_c", 0),
-                "gpu_util_pct": hw.get("gpu_util_pct", 0),
-                "mem_util_pct": hw.get("mem_util_pct", 0),
+                "gpu_util_pct": hw.get("gpu_util_pct"),
+                "mem_util_pct": hw.get("mem_util_pct"),
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
                 "throttle_bitmask": hw.get("throttle_bitmask", 0),
-                "terminated": int(termination_time is not None)
+                "terminated": int(termination_time is not None),
+                "adversary_pid": adversary_pid,
+                "stress_start_ts": round(stress_start_ts - global_start, 4) if stress_start_ts else None,
+                "mitigation_start_ts": round(mitigation_start_ts - global_start, 4) if mitigation_start_ts else None,
+                "monitoring_overhead_ms": round((time.time() - t_curr) * 1000, 2),
             })
 
             prev_current_a = curr_a
@@ -238,6 +259,7 @@ def _run_single_trial(
 
         if cuda_proc is not None:
             cuda_proc.terminate()
+            stress_stop_ts = time.time()
             try:
                 cuda_proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
@@ -246,6 +268,7 @@ def _run_single_trial(
         if mitigation_active or p_info.get("force_clamp"):
             print(f"    [+] Restoring normal operation")
             restore_normal()
+            mitigation_stop_ts = time.time()
 
         phase_records = [r for r in all_records if r["phase"] == p_name]
         mean_tot = float(np.mean(latencies_tot))
@@ -362,6 +385,18 @@ def run_closed_loop_experiment(
         {"name": "victim_clamped_baseline", "run_stress": False, "mitigate": False, "force_clamp": True},
         {"name": "recovery_baseline",      "run_stress": False, "mitigate": False},
     ]
+
+    output_dir = os.path.dirname(output_csv) or "."
+    platform_info = collect_platform_info()
+    platform_info["experiment"] = "T3_closed_loop"
+    platform_info["num_trials"] = num_trials
+    platform_info["duration_per_phase"] = duration_per_phase
+    platform_info["detection_threshold_w"] = detection_threshold_w
+    platform_info["mitigation_label"] = mitigation_label
+    pinfo_path = os.path.join(output_dir, "t3_platform_info.json")
+    with open(pinfo_path, "w") as f:
+        json.dump(platform_info, f, indent=2, default=str)
+    print(f"[+] Platform info saved to {pinfo_path}")
 
     all_trial_records = []
     per_trial_summaries = []

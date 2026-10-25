@@ -24,6 +24,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "T1"))
+from gpu_fault_assessor_v2 import CONDITION_LABELS
+
 
 
 def load_csv(results_dir, filename):
@@ -178,7 +181,11 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
                 seg = t1_df[(t1_df['trial'] == trial) & (t1_df['phase'] == phase)]
                 if len(seg) < window_size:
                     continue
-                is_attack = 1 if 'stress' in str(phase).lower() or 'pulsed' in str(phase).lower() else 0
+                if 'is_attack' in seg.columns:
+                    is_attack = int(seg['is_attack'].iloc[0])
+                else:
+                    lbl = CONDITION_LABELS.get(phase, {})
+                    is_attack = int(lbl.get("is_attack", False))
                 for i in range(0, len(seg) - window_size + 1, window_size):
                     sub = seg.iloc[i:i+window_size]
                     features.append([
@@ -243,6 +250,22 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
                 lines.append(f"  Recall:    {rec*100:.1f}%")
                 lines.append(f"  F1-Score:  {f1*100:.1f}%")
 
+    # --- T2 Hard-Negative Evaluation (if legit workloads present) ---
+    if t1_df is not None and 'category' in t1_df.columns:
+        hard_neg_cats = t1_df[t1_df['category'].isin(
+            ['benign_highpower', 'control_tempsync'])]
+        if len(hard_neg_cats) > 0:
+            lines.append("\n" + "-" * 72)
+            lines.append("TASK 2e: HARD-NEGATIVE EVALUATION (legitimate high-power workloads)")
+            lines.append("-" * 72)
+            for cat in hard_neg_cats['category'].unique():
+                sub = t1_df[t1_df['category'] == cat]
+                pwr = sub['power_w']
+                lines.append(f"  {cat}: n={len(sub)}, "
+                             f"mean_power={pwr.mean():.1f}W, "
+                             f"std={pwr.std():.1f}W, "
+                             f"max={pwr.max():.1f}W")
+
     # --- T2 Power-Level Detector Metrics (from T3 data) ---
     if t3_df is not None and 'anomaly_detected' in t3_df.columns:
         lines.append("\n" + "-" * 72)
@@ -253,7 +276,7 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
             sub = t3_df[t3_df['phase'] == pn]
             n = len(sub)
             n_det = int(sub['anomaly_detected'].sum())
-            is_attack_phase = pn.startswith('attack')
+            is_attack_phase = CONDITION_LABELS.get(pn, {}).get("is_attack", pn.startswith('attack'))
             ground_truth = 1 if is_attack_phase else 0
             if ground_truth == 1:
                 tp = n_det
@@ -266,8 +289,9 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
                 fpr = fp / max(fp + tn, 1)
                 lines.append(f"  {pn:30s}: {n_det:3d}/{n} detected (FPR={fpr:.1%})")
 
-        attack_phases = [p for p in t3_df['phase'].unique() if p.startswith('attack')]
-        benign_phases = [p for p in t3_df['phase'].unique() if not p.startswith('attack')]
+        attack_phases = [p for p in t3_df['phase'].unique()
+                         if CONDITION_LABELS.get(p, {}).get("is_attack", p.startswith('attack'))]
+        benign_phases = [p for p in t3_df['phase'].unique() if p not in attack_phases]
         tp_total = int(t3_df[t3_df['phase'].isin(attack_phases)]['anomaly_detected'].sum())
         fn_total = len(t3_df[t3_df['phase'].isin(attack_phases)]) - tp_total
         fp_total = int(t3_df[t3_df['phase'].isin(benign_phases)]['anomaly_detected'].sum())
@@ -365,6 +389,22 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
             cap_rate = ((sub['sw_power_cap'] == 1) | (sub['hw_slowdown'] == 1)).sum() / len(sub) * 100
             lines.append(f"  {pn} throttle rate: {cap_rate:.1f}%")
 
+        if 'monitoring_overhead_ms' in t3_df.columns:
+            overhead = t3_df['monitoring_overhead_ms'].dropna()
+            if len(overhead) > 0:
+                lines.append(f"\n  Monitoring Overhead:")
+                lines.append(f"    mean={overhead.mean():.2f}ms, "
+                             f"p50={overhead.quantile(0.5):.2f}ms, "
+                             f"p99={overhead.quantile(0.99):.2f}ms, "
+                             f"max={overhead.max():.2f}ms")
+
+        if 'adversary_pid' in t3_df.columns:
+            pids = t3_df[t3_df['adversary_pid'].notna()]['adversary_pid'].unique()
+            if len(pids) > 0:
+                lines.append(f"\n  Process Attribution:")
+                lines.append(f"    Adversarial PIDs identified: {len(pids)}")
+                lines.append(f"    PIDs: {[int(p) for p in pids]}")
+
     # --- T2 Spectral Characterization (Welch PSD) ---
     if t1_df is not None:
         lines.append("\n" + "-" * 72)
@@ -372,22 +412,33 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         lines.append("-" * 72)
 
         for pn in t1_df['phase'].unique():
-            sub = t1_df[t1_df['phase'] == pn]
-            p_vals = sub['power_w'].values
-            if len(p_vals) < 32:
+            trial_psds = []
+            trial_freqs = None
+            for trial in sorted(t1_df['trial'].unique()):
+                seg = t1_df[(t1_df['trial'] == trial) & (t1_df['phase'] == pn)]
+                p_vals = seg['power_w'].values
+                if len(p_vals) < 32:
+                    continue
+                ts = seg['timestamp'].values
+                dt_mean = np.mean(np.diff(ts))
+                fs = 1.0 / dt_mean if dt_mean > 0 else 4.0
+                nperseg = min(len(p_vals), 256)
+                freqs, psd = signal.welch(p_vals, fs=fs, nperseg=nperseg)
+                if trial_freqs is None or len(freqs) == len(trial_freqs):
+                    trial_freqs = freqs
+                    trial_psds.append(psd)
+            if not trial_psds:
                 continue
-            ts = sub['timestamp'].values
-            dt_mean = np.mean(np.diff(ts))
-            fs = 1.0 / dt_mean if dt_mean > 0 else 4.0
-            nyquist = fs / 2.0
-            nperseg = min(len(p_vals), 256)
-            freqs, psd = signal.welch(p_vals, fs=fs, nperseg=nperseg)
-            peak_idx = np.argmax(psd[1:]) + 1
-            peak_freq = freqs[peak_idx]
-            peak_psd_db = 10 * np.log10(psd[peak_idx] + 1e-10)
-            total_power_db = 10 * np.log10(np.sum(psd) + 1e-10)
-            lines.append(f"  {pn:30s}: Fs={fs:.1f}Hz Nyquist={nyquist:.1f}Hz | "
-                         f"peak={peak_freq:.2f}Hz ({peak_psd_db:.1f}dB) total={total_power_db:.1f}dB")
+            avg_psd = np.mean(trial_psds, axis=0)
+            fs_rep = 1.0 / dt_mean if dt_mean > 0 else 4.0
+            nyquist = fs_rep / 2.0
+            peak_idx = np.argmax(avg_psd[1:]) + 1
+            peak_freq = trial_freqs[peak_idx]
+            peak_psd_db = 10 * np.log10(avg_psd[peak_idx] + 1e-10)
+            total_power_db = 10 * np.log10(np.sum(avg_psd) + 1e-10)
+            lines.append(f"  {pn:30s}: Fs={fs_rep:.1f}Hz Nyq={nyquist:.1f}Hz | "
+                         f"peak={peak_freq:.2f}Hz ({peak_psd_db:.1f}dB) "
+                         f"total={total_power_db:.1f}dB [n={len(trial_psds)} trials]")
 
         lines.append(f"\n  Note: Attack pulsing at 10kHz is far above the ~2Hz Nyquist limit.")
         lines.append(f"  Spectral analysis characterizes the low-frequency power envelope,")

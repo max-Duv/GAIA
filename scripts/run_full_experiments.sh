@@ -13,6 +13,7 @@ cd "$GAIA_DIR"
 DURATION=15        # seconds per phase
 TRIALS=10          # repeated trials for statistical significance
 SWEEP_TRIALS=5     # trials for mechanism-isolation sweep
+SEED=42            # reproducible randomization
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$GAIA_DIR/results_${TIMESTAMP}"
@@ -58,9 +59,9 @@ echo "[info] System info saved to $RESULTS_DIR/system_info.txt"
 # =============================================================================
 echo ""
 echo "====================================================================="
-echo "  THRUST 1: 6-Condition Controlled Experiment (${TRIALS} trials)"
-echo "  Conditions: alone, sustained_stress, cache_only, compute_only,"
-echo "              pulsed_stress, temp_sync_stress"
+echo "  THRUST 1: Multi-Condition Controlled Experiment (${TRIALS} trials)"
+echo "  Conditions: alone, sustained, cache, compute, pulsed, temp_sync,"
+echo "              occupancy, legit_highpower, control_novictim, randomized"
 echo "====================================================================="
 
 cd "$GAIA_DIR/T1"
@@ -68,18 +69,40 @@ cd "$GAIA_DIR/T1"
 # Force recompile CUDA binaries (source may have changed)
 echo "[T1] Removing old CUDA binaries and recompiling..."
 rm -f gpu_power_poc_v3 gpu_victim_kernel
-python3 controlled_3phase_runner_v2.py --duration 1 --trials 1
+python3 controlled_3phase_runner_v2.py --duration 1 --trials 1 --seed "$SEED"
 
-echo "[T1] Running main 3-phase experiment (randomized phase order)..."
+# --- Synthetic matmul victim (primary experiment) ---
+echo "[T1] Running main experiment with synthetic victim (randomized phase order)..."
 python3 controlled_3phase_runner_v2.py \
     --duration "$DURATION" \
     --trials "$TRIALS" \
     --randomize \
+    --seed "$SEED" \
+    --victim-type synthetic \
     --out "$RESULTS_DIR/t1_3phase_experiment.csv"
 
-# Copy the summary CSV too
 cp -f controlled_3phase_experiment_v2_summary.csv \
     "$RESULTS_DIR/t1_3phase_summary.csv" 2>/dev/null || true
+
+# --- Training victim (subset — realistic workload evaluation) ---
+echo "[T1] Running training-victim subset (5 trials)..."
+python3 controlled_3phase_runner_v2.py \
+    --duration "$DURATION" \
+    --trials 5 \
+    --randomize \
+    --seed "$((SEED + 1))" \
+    --victim-type training \
+    --out "$RESULTS_DIR/t1_training_victim.csv"
+
+# --- Inference victim (subset) ---
+echo "[T1] Running inference-victim subset (5 trials)..."
+python3 controlled_3phase_runner_v2.py \
+    --duration "$DURATION" \
+    --trials 5 \
+    --randomize \
+    --seed "$((SEED + 2))" \
+    --victim-type inference \
+    --out "$RESULTS_DIR/t1_inference_victim.csv"
 
 echo ""
 echo "====================================================================="
@@ -92,6 +115,7 @@ python3 controlled_3phase_runner_v2.py \
     --duration "$DURATION" \
     --trials "$SWEEP_TRIALS" \
     --sweep \
+    --seed "$((SEED + 10))" \
     --out "$RESULTS_DIR/t1_sweep_experiment.csv"
 
 cp -f controlled_3phase_experiment_v2_summary.csv \
@@ -189,6 +213,15 @@ echo "  $(date)"
 echo "====================================================================="
 echo ""
 echo "Results directory: $RESULTS_DIR"
+echo ""
+
+# --- Run full analysis pipeline ---
+echo "====================================================================="
+echo "  ANALYSIS: Running post-experiment analysis"
+echo "====================================================================="
+cd "$GAIA_DIR"
+python3 analyze_results.py "$RESULTS_DIR" || echo "[analysis] WARNING: Analysis pipeline failed; run on workstation."
+
 echo ""
 echo "Files produced:"
 ls -lh "$RESULTS_DIR/"

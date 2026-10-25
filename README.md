@@ -2,39 +2,47 @@
 
 ## Revised paper figures
 
-Generate the current figure set without changing the original reports or figures:
+Generate the DAC-oriented figure set while preserving earlier exports:
 
 ```bash
-python analyze_results.py results_20261024_181552 --figures-only --out-dir results_20261024_181552/figures_revised
+python analyze_results.py results_20261024_233655 --figures-only --out-dir results_20261024_233655/figures_dac
 ```
 
-Replace the results directory for each new run. `publication_figures.py` owns the
-plotting style and figure definitions. Outputs include 300-dpi PNGs, vector PDFs,
-and a caption text file for each figure. The standard analysis command also uses
-this renderer; without `--figures-only`, it additionally regenerates the existing
-metrics report and LaTeX tables.
+`publication_figures.py` owns the rendering; the normal analysis command uses it
+as well. Replace the results directory for future runs. Outputs include vector
+PDFs with embedded TrueType fonts, 300-dpi PNG previews, and caption text files.
+Every figure has an exact 7.16-inch canvas width, intended for **two-column**
+placement. Use the PDF in the manuscript, not a screenshot of the PNG:
 
-- Figure 1: power and measured rail voltage, aligned within each condition;
-  separate lines for trials, without joining timestamp resets.
-- Figure 2: condition-level kernel time and power, with trial means and 95%
-  Student-t confidence intervals across trials.
-- Figure 3: descriptive power features and achieved sampling rates. This replaces
-  the former concatenated spectrogram/PCA display; it is not classifier validation.
-- Figure 4: power/performance comparisons and the first trial's response timeline.
-- Figure 5: sweep results on a logarithmic configured-window axis.
-- Figure 6: recorded detector alarm rates, first-alarm delays, and missed events.
+```latex
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/fig5_t1_sweep.pdf}
+  \caption{Adapt the accompanying caption text to your experiment.}
+  \label{fig:parameter-sweep}
+\end{figure*}
+```
 
-No assumed TDP or 120% threshold is drawn. `--tdp WATTS` optionally adds a
-user-specified power reference; verify that it applies to the measured rail.
-Figures use logged values and do not validate sensor provenance, actual pulse
-timing, or hardware enforcement. Use the caption files when interpreting each
-figure. Historical runs retain their original acquisition limitations.
+Do not shrink these composite figures to one column: that also shrinks their
+9-point labels. Arial is preferred when installed; DejaVu Sans is the portable
+fallback. Captions belong in LaTeX, so there are no redundant figure-wide titles.
 
-**CYSE 698 | SPIRE LAB 2026 | Max Duverneuil**
+- Figure 1: power envelopes, using per-trial 0.5-second bin means followed by
+  across-trial median and interquartile range. The band is **not** a confidence
+  interval. No interpolation bridges missing bins or trial boundaries.
+- Figures 2–4 and 6: trial-level comparisons and telemetry/response diagnostics.
+  Open circles denote trials; diamonds and error bars summarize trial means
+  with 95% Student-t intervals. Feature plots also use distinct marker shapes.
+- Figure 5: frequency/window and duty-cycle sweeps. Power and kernel time have
+  separate panels and units. Supports both older window sweeps and new sweeps.
+- Figure 7: trial mean and minimum rail-voltage summaries, separated from power
+  traces to preserve readable labels and expose quantization.
 
-This directory contains all code needed to reproduce the experiments described in the Proposed Research Project. Each script maps to a specific task, metric, and deliverable from the proposal.
-
----
+The summary plots retain all trial observations; cosmetic changes do not remove
+outliers or change statistical reports. Binned envelopes intentionally suppress
+sample-level detail; consult raw telemetry for transient analysis. Inspect final
+placement in the compiled manuscript before submission. An optional `--tdp`
+adds a user-supplied power reference; no hardware threshold is assumed.
 
 ## How This Code Maps to the Research Proposal
 

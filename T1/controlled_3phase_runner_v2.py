@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import json
+import random
 import subprocess
 import csv
 import argparse
@@ -12,7 +14,7 @@ from scipy.stats import ttest_rel
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
-from gpu_fault_assessor_v2 import GPUFaultAssessorV2
+from gpu_fault_assessor_v2 import GPUFaultAssessorV2, CONDITION_LABELS, collect_platform_info
 
 _EXE = ".exe" if sys.platform == "win32" else ""
 
@@ -105,15 +107,27 @@ def significance_stars(p_value):
     return "ns"
 
 
-def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_label, randomize_order=False):
+def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
+                     trial_label, randomize_order=False, victim_fn=None,
+                     temp_sync_log=None):
+    """Run one complete trial through all phases.
+
+    Args:
+        victim_fn: callable returning dict with timing fields.
+            Falls back to assessor.run_victim_workload_iteration().
+        temp_sync_log: if a list, full thermal-sync metadata is appended
+            per temp-sync phase (all readings, timestamps, trigger info).
+    """
     records = []
     phase_summaries = {}
     trial_start = time.time()
     prev_current_a = 0.0
     prev_time = trial_start
 
+    if victim_fn is None:
+        victim_fn = assessor.run_victim_workload_iteration
+
     if randomize_order:
-        import random
         phases = list(phases)
         random.shuffle(phases)
 
@@ -124,14 +138,25 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
         p_duty = p_info["duty"]
         temp_sync = p_info.get("temp_sync", False)
         temp_sync_trigger = "none"
+        temp_sync_data = {}
+        run_victim = p_info.get("run_victim", True)
+        phase_victim_fn = p_info.get("victim_fn_override", victim_fn)
+        stress_start_ts = None
 
         print(f"  [{trial_label}] Phase '{p_name}' (Mode: {p_mode}, Freq: {p_freq} kHz, Duty: {p_duty})...")
         cuda_proc = None
 
+        label_info = CONDITION_LABELS.get(p_name)
+        if label_info is None:
+            is_atk = p_mode is not None
+            label_info = {"is_attack": is_atk,
+                          "category": "sweep" if p_name.startswith("sweep_") else "unknown"}
+        is_attack = int(label_info["is_attack"])
+
         if temp_sync and p_mode is not None:
             from gpu_fault_assessor_v2 import _cuda_subprocess_env
 
-            # Phase 1: Pre-heat GPU with a brief stress burst to elevate temp
+            preheat_start = time.time()
             print(f"    [temp-sync] Phase 1: Pre-heating GPU (5s stress burst)...")
             preheat_cmd = [
                 cuda_binary, "--mode", "oversubscribe",
@@ -148,38 +173,59 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
             except subprocess.TimeoutExpired:
                 preheat_proc.kill()
             heated_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
-            print(f"    [temp-sync] Post-heat temp: {heated_temp:.1f}°C")
+            print(f"    [temp-sync] Post-heat temp: {heated_temp:.3f}C")
 
-            # Phase 2: Brief cooling period — no workload, GPU temp should decline
             print(f"    [temp-sync] Phase 2: Cooling (3s idle)...")
             time.sleep(3)
             cooled_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
-            print(f"    [temp-sync] Post-cool temp: {cooled_temp:.1f}°C (dropped {heated_temp - cooled_temp:.1f}°C)")
+            print(f"    [temp-sync] Post-cool temp: {cooled_temp:.3f}C (dropped {heated_temp - cooled_temp:.3f}C)")
 
-            # Phase 3: Start victim, detect thermal inflection
-            # GPU is cooling. Victim compute generates heat, causing temp to
-            # stop falling or rise — that inflection IS the side-channel signal.
-            print(f"    [temp-sync] Phase 3: Running victim, watching for thermal inflection...")
+            print(f"    [temp-sync] Phase 3: Watching for thermal inflection...")
             prev_temp = cooled_temp
-            temp_readings = [cooled_temp]
+            temp_trace = [(time.time() - trial_start, cooled_temp)]
             sync_start = time.time()
+
+            victim_started = run_victim
+            if run_victim:
+                phase_victim_fn()
+
             while (time.time() - sync_start) < 15.0:
-                assessor.run_victim_workload_iteration()
+                if run_victim:
+                    phase_victim_fn()
+                else:
+                    time.sleep(0.25)
                 cur_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
-                temp_readings.append(cur_temp)
-                if len(temp_readings) >= 3 and cur_temp >= prev_temp and prev_temp <= temp_readings[-3]:
-                    elapsed_sync = time.time() - sync_start
-                    print(f"    [temp-sync] Thermal inflection: {prev_temp:.1f}°C -> {cur_temp:.1f}°C "
-                          f"after {elapsed_sync:.1f}s — launching synchronized attack")
-                    temp_sync_trigger = "temp_triggered"
-                    break
+                temp_trace.append((time.time() - trial_start, cur_temp))
+                if len(temp_trace) >= 3:
+                    t2 = temp_trace[-1][1]
+                    t1 = temp_trace[-2][1]
+                    t0 = temp_trace[-3][1]
+                    if t2 >= t1 and t1 <= t0 and (t2 - t1) > 0:
+                        elapsed_sync = time.time() - sync_start
+                        print(f"    [temp-sync] Inflection: {t1:.3f}C -> {t2:.3f}C "
+                              f"after {elapsed_sync:.1f}s")
+                        temp_sync_trigger = "temp_triggered"
+                        break
                 prev_temp = cur_temp
                 time.sleep(0.05)
             else:
                 cur_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
-                print(f"    [temp-sync] Timeout after 15s (temp: {cur_temp:.1f}°C, "
-                      f"readings: {[f'{t:.1f}' for t in temp_readings[-5:]]})")
+                print(f"    [temp-sync] Timeout after 15s (temp: {cur_temp:.3f}C)")
                 temp_sync_trigger = "timeout_triggered"
+
+            temp_sync_data = {
+                "trial": trial_label,
+                "phase": p_name,
+                "preheat_start_s": round(preheat_start - trial_start, 3),
+                "heated_temp_c": heated_temp,
+                "cooled_temp_c": cooled_temp,
+                "trigger": temp_sync_trigger,
+                "detection_delay_s": round(time.time() - sync_start, 3),
+                "run_victim": run_victim,
+                "temp_trace": [(round(t, 4), round(v, 4)) for t, v in temp_trace],
+            }
+            if temp_sync_log is not None:
+                temp_sync_log.append(temp_sync_data)
 
         if p_mode is not None and os.path.exists(cuda_binary):
             cmd = [
@@ -192,6 +238,7 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
             try:
                 from gpu_fault_assessor_v2 import _cuda_subprocess_env
                 cuda_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_cuda_subprocess_env())
+                stress_start_ts = time.time()
                 time.sleep(0.5)
             except Exception as e:
                 raise RuntimeError(f"Failed to spawn stress process: {e}")
@@ -202,7 +249,12 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
         phase_start = time.time()
 
         while (time.time() - phase_start) < duration_per_phase:
-            v_res = assessor.run_victim_workload_iteration()
+            if run_victim:
+                v_res = phase_victim_fn()
+            else:
+                v_res = {"total_latency_ms": 0, "launch_delay_ms": 0,
+                         "gpu_compute_ms": 0, "victim_backend": "none"}
+                time.sleep(0.1)
             latencies_tot.append(v_res["total_latency_ms"])
             latencies_delay.append(v_res["launch_delay_ms"])
             latencies_compute.append(v_res["gpu_compute_ms"])
@@ -225,6 +277,8 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
             records.append({
                 "timestamp": round(t_curr - trial_start, 4),
                 "phase": p_name,
+                "is_attack": is_attack,
+                "category": label_info["category"],
                 "data_source": hw["provenance"],
                 "power_w": round(p_w, 3),
                 "voltage_v": round(v_meas, 5),
@@ -233,26 +287,33 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
                 "victim_kernel_ms": round(v_res["gpu_compute_ms"], 3),
                 "victim_total_latency_ms": round(v_res["total_latency_ms"], 3),
                 "victim_launch_delay_ms": round(v_res["launch_delay_ms"], 3),
+                "victim_backend": v_res.get("victim_backend", "unknown"),
                 "sm_clock_mhz": sm_clk,
                 "gpu_temp_c": gpu_temp,
-                "gpu_util_pct": hw.get("gpu_util_pct", 0),
-                "mem_util_pct": hw.get("mem_util_pct", 0),
+                "gpu_util_pct": hw.get("gpu_util_pct"),
+                "mem_util_pct": hw.get("mem_util_pct"),
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
                 "throttle_bitmask": hw.get("throttle_bitmask", 0),
-                "temp_sync_trigger": temp_sync_trigger
+                "temp_sync_trigger": temp_sync_trigger,
+                "stress_start_ts": round(stress_start_ts - trial_start, 4) if stress_start_ts else None,
             })
 
             prev_current_a = curr_a
             prev_time = t_curr
             time.sleep(0.02)
 
+        stress_stop_ts = None
         if cuda_proc is not None:
             cuda_proc.terminate()
+            stress_stop_ts = time.time()
             try:
                 cuda_proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 cuda_proc.kill()
+        for r in records:
+            if r["phase"] == p_name and stress_stop_ts:
+                r["stress_stop_ts"] = round(stress_stop_ts - trial_start, 4)
 
         phase_records = [r for r in records if r["phase"] == p_name]
         cap_count = sum(1 for r in phase_records if r["sw_power_cap"] == 1 or r["hw_slowdown"] == 1)
@@ -288,30 +349,27 @@ def run_controlled_3phase_experiment(
     sweep_mechanism=False,
     num_trials=10,
     randomize_order=False,
-    arch_override=None
+    arch_override=None,
+    seed=None,
+    victim_type="synthetic",
 ):
-    """
-    Executes a controlled 3-condition experiment with repeated trials for statistical rigor.
-
-    Conditions:
-    1. 'victim_alone' — Baseline un-contended GPU
-    2. 'victim_matched_benign' — Victim + continuous compute stress
-    3. 'victim_pulsed_stress' — Victim + 10.0 kHz frequency-pulsed stress
-
-    Runs a warmup trial (discarded), then num_trials recorded trials.
-    Produces per-sample CSV, per-trial summary CSV, and paired t-tests.
-    """
     if cuda_binary is None:
         cuda_binary = os.path.join(SCRIPT_DIR, "gpu_power_poc_v3" + _EXE)
     if output_csv is None:
         output_csv = os.path.join(SCRIPT_DIR, "controlled_3phase_experiment_v2.csv")
 
     summary_csv = output_csv.replace(".csv", "_summary.csv")
+    output_dir = os.path.dirname(output_csv) or "."
+
+    if seed is None:
+        seed = random.randint(0, 2**31 - 1)
+    random.seed(seed)
+    np.random.seed(seed % (2**32))
 
     print("=====================================================================")
-    print(" Project GAIA: Controlled 3-Phase & Mechanism-Isolation Harness (v2.0) ")
-    print(" Grounded in RTSS (MPE), Islam/Ren, & Jetson Orin INA3221 Telemetry   ")
-    print(f" Trials: {num_trials} | Duration/phase: {duration_per_phase}s           ")
+    print(" Project GAIA: Controlled Multi-Phase Experiment Harness (v2.1)       ")
+    print(f" Trials: {num_trials} | Duration/phase: {duration_per_phase}s | Seed: {seed}")
+    print(f" Victim: {victim_type}")
     print("=====================================================================")
 
     if not os.path.exists(cuda_binary):
@@ -319,7 +377,24 @@ def run_controlled_3phase_experiment(
 
     print("\n[init] Initializing hardware assessor...")
     assessor = GPUFaultAssessorV2(arch_override=arch_override)
-    print("[init] Assessor ready\n")
+    print("[init] Assessor ready")
+
+    platform_info = collect_platform_info()
+    platform_info["experiment_seed"] = seed
+    platform_info["victim_type"] = victim_type
+    platform_info["num_trials"] = num_trials
+    platform_info["duration_per_phase"] = duration_per_phase
+    platform_info["randomize_order"] = randomize_order
+    platform_info["sweep_mechanism"] = sweep_mechanism
+    platform_path = os.path.join(output_dir, "platform_info.json")
+    with open(platform_path, "w") as f:
+        json.dump(platform_info, f, indent=2, default=str)
+    print(f"[init] Platform info saved to {platform_path}")
+
+    from realistic_victims import create_victim, create_legitimate_workload
+    victim_fn = create_victim(victim_type)
+    legit_workload_fn = create_legitimate_workload()
+    print(f"[init] Victim ({victim_type}) and legitimate workload ready\n")
 
     phases = [
         {"name": "victim_alone", "mode": None, "freq": 0, "duty": 0.0},
@@ -328,6 +403,13 @@ def run_controlled_3phase_experiment(
         {"name": "victim_compute_only", "mode": "compute", "freq": 0.001, "duty": 1.0},
         {"name": "victim_pulsed_stress", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5},
         {"name": "victim_temp_sync_stress", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5,
+         "temp_sync": True},
+        {"name": "victim_occupancy_stress", "mode": "occupancy", "freq": 0.001, "duty": 1.0},
+        {"name": "victim_legit_highpower", "mode": None, "freq": 0, "duty": 0.0,
+         "victim_fn_override": legit_workload_fn},
+        {"name": "temp_sync_control_novictim", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5,
+         "temp_sync": True, "run_victim": False},
+        {"name": "temp_sync_randomized_delay", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5,
          "temp_sync": True},
     ]
 
@@ -352,15 +434,15 @@ def run_controlled_3phase_experiment(
                 "duty": duty_pct / 100.0,
             })
 
-    # --- Warmup trial (discarded) to stabilize GPU clocks and thermals ---
     print("\n[+] Warmup trial (discarded)...")
-    run_single_trial(phases, cuda_binary, duration_per_phase, assessor, "warmup")
+    run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
+                     "warmup", victim_fn=victim_fn)
     print("[+] Warmup complete. Starting recorded trials.\n")
 
-    # --- Recorded trials ---
     all_records = []
-    all_trial_summaries = []  # list of {trial, phase, ...stats}
-    per_phase_trial_means = {}  # phase_name -> list of per-trial mean latencies
+    all_trial_summaries = []
+    per_phase_trial_means = {}
+    temp_sync_log = []
 
     for phase in phases:
         per_phase_trial_means[phase["name"]] = []
@@ -372,7 +454,9 @@ def run_controlled_3phase_experiment(
 
         records, phase_summaries = run_single_trial(
             phases, cuda_binary, duration_per_phase, assessor, f"T{trial_idx}",
-            randomize_order=randomize_order
+            randomize_order=randomize_order,
+            victim_fn=victim_fn,
+            temp_sync_log=temp_sync_log,
         )
 
         for r in records:
@@ -385,16 +469,25 @@ def run_controlled_3phase_experiment(
             row.update(stats)
             all_trial_summaries.append(row)
 
+    if temp_sync_log:
+        ts_path = os.path.join(output_dir, "temp_sync_log.json")
+        with open(ts_path, "w") as f:
+            json.dump(temp_sync_log, f, indent=2)
+        print(f"[+] Temp-sync trace log saved to: {ts_path}")
+
     if all_records:
         fieldnames = [
-            "trial", "timestamp", "phase", "data_source", "power_w", "voltage_v",
+            "trial", "timestamp", "phase", "is_attack", "category",
+            "data_source", "power_w", "voltage_v",
             "current_a", "di_dt_amps_per_sec", "victim_kernel_ms",
             "victim_total_latency_ms", "victim_launch_delay_ms",
+            "victim_backend",
             "sm_clock_mhz", "gpu_temp_c", "gpu_util_pct", "mem_util_pct",
-            "sw_power_cap", "hw_slowdown", "throttle_bitmask", "temp_sync_trigger"
+            "sw_power_cap", "hw_slowdown", "throttle_bitmask",
+            "temp_sync_trigger", "stress_start_ts", "stress_stop_ts"
         ]
         with open(output_csv, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(all_records)
         print(f"\n[+] Per-sample dataset saved to: {output_csv}")
@@ -492,10 +585,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Project GAIA Thrust 1 Experiment Runner")
     parser.add_argument("--duration", type=float, default=15.0, help="Duration per phase in seconds")
     parser.add_argument("--out", type=str, default=None, help="Output CSV path (default: alongside this script)")
-    parser.add_argument("--sweep", action="store_true", help="Include launch-duration sweep for DAC Fig 6")
+    parser.add_argument("--sweep", action="store_true", help="Include frequency/duty-cycle sweep phases")
     parser.add_argument("--trials", type=int, default=10, help="Number of recorded trials (default: 10)")
-    parser.add_argument("--arch", type=str, default=None, help="GPU arch override, e.g. sm_87 for Jetson Orin (skips detection)")
+    parser.add_argument("--arch", type=str, default=None, help="GPU arch override, e.g. sm_110 for Jetson Thor")
     parser.add_argument("--randomize", action="store_true", help="Randomize phase order per trial")
+    parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility")
+    parser.add_argument("--victim-type", type=str, default="synthetic",
+                        choices=["synthetic", "training", "inference"],
+                        help="Victim workload type (default: synthetic)")
     args = parser.parse_args()
 
     run_controlled_3phase_experiment(
@@ -504,5 +601,7 @@ if __name__ == "__main__":
         sweep_mechanism=args.sweep,
         num_trials=args.trials,
         arch_override=args.arch,
-        randomize_order=args.randomize
+        randomize_order=args.randomize,
+        seed=args.seed,
+        victim_type=args.victim_type,
     )

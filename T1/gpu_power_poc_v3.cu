@@ -172,10 +172,53 @@ __global__ void l2_pin_enemy(
     }
 }
 
+// --- KERNEL 5: Occupancy Saturation ---
+// Launches far more blocks than SMs and uses shared memory to limit
+// concurrent warps per SM, targeting the occupancy resource specifically.
+__global__ void occupancy_saturator(
+    unsigned long long active_cycles,
+    unsigned long long idle_cycles,
+    unsigned long long total_pulses)
+{
+    // Reserve shared memory to limit concurrent blocks per SM.
+    // 16 KB per block on a 256 KB shared-memory SM allows ~16 concurrent
+    // blocks; with 1024 threads each that saturates the 2048-thread limit.
+    extern __shared__ uint32_t shmem[];
+
+    uint32_t val1 = threadIdx.x + blockIdx.x;
+    uint32_t val2 = blockIdx.x * 31 + threadIdx.x;
+
+    // Touch shared memory so the compiler doesn't optimise it away
+    if (threadIdx.x < blockDim.x)
+        shmem[threadIdx.x % 256] = val1;
+    __syncthreads();
+
+    for (unsigned long long pulse = 0; pulse < total_pulses; ++pulse) {
+        long long int active_start = clock64();
+        while ((clock64() - active_start) < (long long int)active_cycles) {
+            val1 = (val1 * 1103515245 + 12345) + val2;
+            val2 = (val2 * 1103515245 + 12345) + val1;
+            // Periodically read shared memory to maintain allocation
+            val1 ^= shmem[val1 % 256];
+            asm volatile("" : "+r"(val1), "+r"(val2) :: "memory");
+        }
+
+        long long int idle_start = clock64();
+        while ((clock64() - idle_start) < (long long int)idle_cycles) {
+            asm volatile("" : : : "memory");
+        }
+    }
+
+    // Prevent dead-code elimination
+    if (val1 == 0xDEADBEEF)
+        shmem[0] = val2;
+}
+
+
 void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n"
               << "Options:\n"
-              << "  --mode <cache|compute|oversubscribe|all|math_only|memory_only|pin|scan> Attack mode (default: compute)\n"
+              << "  --mode <cache|compute|oversubscribe|occupancy|all|math_only|memory_only|pin|scan> Attack mode (default: compute)\n"
               << "  --freq <float>       Modulation frequency in kHz (default: 10.0 kHz)\n"
               << "  --duty <float>       Duty cycle of active phase (0.1 to 0.9, default: 0.5)\n"
               << "  --duration <float>   Total test duration in seconds (default: 5.0s)\n"
@@ -288,6 +331,16 @@ int main(int argc, char* argv[]) {
         l2_pin_enemy<<<blocks, threads, 0, streams[0]>>>(
             d_buf, total_buf_bytes, active_cycles, idle_cycles, total_pulses);
         CUDA_CHECK(cudaGetLastError());
+    } else if (mode == "occupancy") {
+        // Saturate SM occupancy: many blocks per SM, shared memory per block
+        dim3 occ_threads(256);
+        dim3 occ_blocks(prop.multiProcessorCount * 16);
+        size_t shmem_bytes = 1024;  // 1 KB shared mem per block
+        for (int i = 0; i < num_streams; ++i) {
+            occupancy_saturator<<<occ_blocks, occ_threads, shmem_bytes, streams[i]>>>(
+                active_cycles, idle_cycles, total_pulses);
+            CUDA_CHECK(cudaGetLastError());
+        }
     } else { // compute / math_only
         for (int i = 0; i < num_streams; ++i) {
             modulated_compute_enemy<<<blocks, threads, 0, streams[i]>>>(

@@ -6,15 +6,27 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy.stats import t as student_t
+from matplotlib.ticker import MaxNLocator, LogLocator, NullLocator, FuncFormatter
+from matplotlib import font_manager
+
+# Resolve once; Arial is available on Windows, with a portable bundled fallback.
+FONT = 'Arial' if any(f.name == 'Arial' for f in font_manager.fontManager.ttflist) else 'DejaVu Sans'
+PAGE_WIDTH = 7.16
 
 STYLE = {
-    'font.family': 'DejaVu Sans', 'font.size': 9,
-    'axes.titlesize': 10, 'axes.titleweight': 'medium',
+    'font.family': FONT, 'font.size': 9,
+    'axes.labelcolor': '#202020', 'text.color': '#202020',
+    'xtick.labelsize': 9, 'ytick.labelsize': 9,
+    'axes.linewidth': .7, 'lines.linewidth': 1.6,
+    'axes.formatter.useoffset': False,
+    'figure.constrained_layout.w_pad': .06,
+    'figure.constrained_layout.h_pad': .06,
+    'axes.titlesize': 10, 'axes.titleweight': 'bold',
     'axes.labelsize': 9, 'legend.fontsize': 8,
     'axes.spines.top': False, 'axes.spines.right': False,
-    'axes.grid': True, 'grid.alpha': .18, 'grid.linewidth': .6,
+    'axes.grid': True, 'grid.alpha': .6, 'grid.color': '#D9DDE2', 'grid.linewidth': .5,
     'pdf.fonttype': 42, 'ps.fonttype': 42,
-    'savefig.dpi': 300,
+    'savefig.dpi': 300, 'legend.frameon': False,
 }
 CONDITIONS = {
     'victim_alone': ('Baseline', '#555555'),
@@ -62,69 +74,103 @@ def save(fig, out_dir, name, caption):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     for ext in ('png', 'pdf'):
-        fig.savefig(out / f'{name}.{ext}', bbox_inches='tight', facecolor='white')
-    (out / f'{name}_caption.txt').write_text(caption + '\n', encoding='utf-8')
+        fig.savefig(out / f'{name}.{ext}', facecolor='white')
+    (out / f'{name}_caption.txt').write_text(caption + '\nLayout: two-column figure, 7.16 inches wide. Insert the PDF at text width; do not shrink to one column.\n', encoding='utf-8')
     plt.close(fig)
     print(f'  [saved] {name}.{{png,pdf}} and caption')
 
 
 def summary(ax, df, column, mapping, xlabel):
-    """Each faint dot is one trial; diamonds and intervals summarize trials."""
+    """Open circles are trials; diamonds and intervals summarize trials."""
     present = [p for p in mapping if (df.phase == p).any()]
     for i, phase in enumerate(present):
         values = df[df.phase == phase].groupby('trial')[column].mean().dropna().values
         label, color = mapping[phase]
-        ax.scatter(values, i + np.linspace(-.12, .12, len(values)), s=16,
-                   color=color, alpha=.5, edgecolors='none', zorder=3)
+        ax.scatter(values, i + (np.linspace(-.15, .15, len(values)) if len(values) > 1 else np.zeros(len(values))), s=20,
+                   facecolors='white', edgecolors=color, linewidths=.8, zorder=3)
         mean, ci = mean_ci(values)
         ax.errorbar(mean, i, xerr=ci if np.isfinite(ci) else None,
-                    fmt='D', color=color, ms=5, capsize=3, lw=1.5, zorder=4)
+                    fmt='D', color=color, ms=5, capsize=3, lw=1.6, zorder=4)
     ax.set_yticks(range(len(present)), [mapping[p][0] for p in present])
     ax.set_ylim(len(present)-.5, -.5)
     ax.set_xlabel(xlabel)
     ax.grid(axis='y', visible=False)
-    ax.margins(x=.15)
+    ax.margins(x=.12)
+    ax.xaxis.set_major_locator(MaxNLocator(4))
 
 
 @plt.rc_context(STYLE)
 def figure_t1_power_characterization(df, out_dir, tdp_w=None):
+    """Equal-weight trial summaries in explicit 0.5-second bins, not spaghetti."""
+    import pandas as pd
     phases = [p for p in CONDITIONS if (df.phase == p).any()]
-    fig, axes = plt.subplots(2, len(phases), figsize=(7.16, 4.2),
-                             sharex=True, sharey='row', squeeze=False,
+    if not phases:
+        return
+    cols = min(3, len(phases))
+    rows = int(np.ceil(len(phases) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(PAGE_WIDTH, 1.9 * rows + .25),
+                             sharex=True, sharey=True, squeeze=False,
                              layout='constrained')
     for j, phase in enumerate(phases):
+        ax = axes.flat[j]
         label, color = CONDITIONS[phase]
         segments = [g for _, g in trial_segments(df[df.phase == phase])]
+        binned = []
         for g in segments:
             elapsed = g.timestamp - g.timestamp.iloc[0]
-            axes[0, j].plot(elapsed, g.power_w, color=color, alpha=.35, lw=.8)
-            axes[1, j].plot(elapsed, g.voltage_v, color=color, alpha=.35, lw=.8)
-        axes[0, j].set_title(f'{label}\n(n={len(segments)})', fontsize=9)
-        axes[1, j].set_xlabel('Elapsed (s)')
-        axes[1, j].ticklabel_format(axis='y', useOffset=False)
+            bins = np.floor(elapsed.to_numpy() / .5).astype(int)
+            binned.append(pd.Series(g.power_w.to_numpy()).groupby(bins).mean())
+        aligned = pd.concat(binned, axis=1).sort_index()
+        aligned = aligned.reindex(range(int(aligned.index.max()) + 1))
+        center = aligned.median(axis=1)
+        lo, hi = aligned.quantile(.25, axis=1), aligned.quantile(.75, axis=1)
+        x = aligned.index.to_numpy() * .5 + .25
+        ax.fill_between(x, lo, hi, color=color, alpha=.20, linewidth=0)
+        ax.plot(x, center, color=color, lw=1.7)
+        ax.set_title(f'({chr(97+j)}) {label}', loc='left')
+        ax.text(.97, .08, f'n = {len(segments)}', transform=ax.transAxes,
+                ha='right', va='bottom', fontsize=8)
+        ax.xaxis.set_major_locator(MaxNLocator(4))
+        ax.yaxis.set_major_locator(MaxNLocator(4))
+        ax.grid(axis='x', visible=False)
         if tdp_w is not None:
-            axes[0, j].axhline(tdp_w, color='#333333', ls='--', lw=.8)
-    axes[0, 0].set_ylabel('Recorded power (W)')
-    axes[1, 0].set_ylabel('Measured rail voltage (V)')
-    fig.suptitle('Power and voltage within each condition', fontsize=12)
+            ax.axhline(tdp_w, color='#333333', ls='--', lw=1)
+    for ax in list(axes.flat)[len(phases):]:
+        ax.set_visible(False)
+    fig.supxlabel('Time since first condition sample (s)', fontsize=9)
+    fig.supylabel('Recorded power (W)', fontsize=9)
     save(fig, out_dir, 'fig1_t1_power_characterization',
-         'Each line is one trial, aligned to its first sample within a condition. '
-         'No lines bridge trial or phase boundaries. Voltage is the logged rail measurement, '
-         'not GPU core voltage. Power rail attribution requires the acquisition configuration. '
-         + (f'Dashed line: user-specified reference of {tdp_w:g} W; verify rail applicability.'
-            if tdp_w is not None else 'No assumed TDP or oversubscription threshold is shown.'))
+         'Within each trial-condition segment, samples are averaged in nonoverlapping '
+         '0.5-second bins aligned to the first sample. Solid lines show the median of '
+         'available trial bin means; bands show the interquartile range, not a confidence '
+         'interval. Empty bins break the line; end bins may contain fewer trials. '
+         'This display summarizes the measured power envelope, not fast electrical transients. '
+         + (f'Dashed line: user-specified reference {tdp_w:g} W.' if tdp_w is not None else ''))
+
+    # Voltage is a separate summary so small rail changes do not become crowded traces.
+    fig, axes = plt.subplots(1, 2, figsize=(PAGE_WIDTH, 3.3), layout='constrained')
+    summary(axes[0], df, 'voltage_v', CONDITIONS, 'Trial mean rail voltage (V)')
+    minima = df.groupby(['trial', 'phase'], as_index=False).voltage_v.min()
+    summary(axes[1], minima, 'voltage_v', CONDITIONS, 'Trial minimum rail voltage (V)')
+    for i, ax in enumerate(axes):
+        ax.set_title(['(a) Mean voltage', '(b) Minimum voltage'][i], loc='left')
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:.3f}'))
+    save(fig, out_dir, 'fig7_t1_rail_voltage',
+         'Open circles are trial means (left) or trial minima (right). Diamonds and '
+         '95% Student-t intervals summarize these trial statistics. Voltage is the '
+         'logged rail measurement, not on-die GPU core voltage. Equal values can reflect '
+         'sensor quantization; small numerical differences do not establish physical droop.')
 
 
 @plt.rc_context(STYLE)
 def figure_t1_latency_degradation(df, out_dir):
-    fig, axes = plt.subplots(1, 2, figsize=(7.16, 3.4), layout='constrained')
+    fig, axes = plt.subplots(1, 2, figsize=(PAGE_WIDTH, 3.3), layout='constrained')
     summary(axes[0], df, kernel_column(df), CONDITIONS, 'Victim kernel time (ms)')
     summary(axes[1], df, 'power_w', CONDITIONS, 'Recorded power (W)')
     axes[0].set_title('(a) Kernel time')
     axes[1].set_title('(b) Power demand')
-    fig.suptitle('Condition comparisons across trials', fontsize=12)
     save(fig, out_dir, 'fig2_t1_latency_degradation',
-         'Small dots are individual trial means. Diamonds are equally weighted means of trial '
+         'Open circles are individual trial means. Diamonds are equally weighted means of trial '
          'means; error bars are two-sided 95% Student-t confidence intervals across trials '
          '(not independent telemetry samples). Intervals describe repeatability within this '
          'experiment and do not remove systematic measurement bias. Lower kernel time means faster execution.')
@@ -135,16 +181,18 @@ def figure_t2_defense_diagnostics(df, out_dir):
     """Describe condition features without presenting PCA as detector validation."""
     features = df.groupby(['trial', 'phase']).agg(
         mean_power=('power_w', 'mean'), power_sd=('power_w', 'std')).reset_index()
-    fig, axes = plt.subplots(1, 2, figsize=(7.16, 3.6), layout='constrained')
-    for phase, (label, color) in CONDITIONS.items():
+    fig, axes = plt.subplots(1, 2, figsize=(PAGE_WIDTH, 3.7), layout='constrained')
+    for idx, (phase, (label, color)) in enumerate(CONDITIONS.items()):
         g = features[features.phase == phase]
         if len(g):
             axes[0].scatter(g.mean_power, g.power_sd, label=label, color=color,
-                            s=28, edgecolors='white', linewidths=.4)
+                            s=28, marker=['o', 's', '^', 'D', 'v', 'P', 'X'][idx % 7],
+                            edgecolors='white', linewidths=.4)
     axes[0].set_xlabel('Trial mean power (W)')
     axes[0].set_ylabel('Within-trial power SD (W)')
     axes[0].set_title('(a) Power features by condition')
-    axes[0].legend(loc='best', fontsize=7)
+    axes[0].legend(loc='upper left', bbox_to_anchor=(0, -.22),
+                   ncol=2, fontsize=8, borderaxespad=0, columnspacing=1)
     rows = []
     for (trial, phase), g in trial_segments(df):
         dt = np.diff(g.timestamp)
@@ -154,7 +202,6 @@ def figure_t2_defense_diagnostics(df, out_dir):
     import pandas as pd
     summary(axes[1], pd.DataFrame(rows), 'rate', CONDITIONS, 'Sampling rate (Hz)')
     axes[1].set_title('(b) Achieved sampling rate')
-    fig.suptitle('Telemetry characterization', fontsize=12)
     save(fig, out_dir, 'fig3_t2_defense_diagnostics',
          'Left: each point describes one trial-condition segment. Feature separation is '
          'descriptive, not held-out detector accuracy. Right: rates use median positive '
@@ -164,7 +211,7 @@ def figure_t2_defense_diagnostics(df, out_dir):
 
 @plt.rc_context(STYLE)
 def figure_t3_mitigation(df, out_dir):
-    fig, axes = plt.subplots(2, 2, figsize=(7.16, 6.0), layout='constrained')
+    fig, axes = plt.subplots(2, 2, figsize=(PAGE_WIDTH, 5.5), layout='constrained')
     summary(axes[0, 0], df, 'power_w', T3, 'Recorded power (W)')
     summary(axes[0, 1], df, kernel_column(df), T3, 'Victim kernel time (ms)')
     axes[0, 0].set_title('(a) Power across trials')
@@ -182,7 +229,7 @@ def figure_t3_mitigation(df, out_dir):
                 ax.axvline(onset, color='#333333', ls='--', lw=1)
                 ax.axvspan(onset, elapsed.iloc[-1], color='#0072B2', alpha=.08)
                 ax.text(.98, .78, f'Activation flag: {onset:.2f} s',
-                        transform=ax.transAxes, ha='right', va='top', fontsize=7,
+                        transform=ax.transAxes, ha='right', va='top', fontsize=8,
                         bbox=dict(facecolor='white', edgecolor='none', alpha=.85, pad=2))
         for ax in axes[1]:
             ax.set_xlabel('Time since first phase sample (s)')
@@ -190,9 +237,8 @@ def figure_t3_mitigation(df, out_dir):
         axes[1, 1].set_ylabel('Victim kernel time (ms)')
     axes[1, 0].set_title(f'(c) Response timeline: trial {trial}')
     axes[1, 1].set_title(f'(d) Kernel timing: trial {trial}')
-    fig.suptitle('Power containment and performance tradeoff', fontsize=12)
     save(fig, out_dir, 'fig4_t3_mitigation',
-         'Top: trial means (dots), equally weighted aggregate means (diamonds), and 95% '
+         'Top: trial means (open circles), equally weighted aggregate means (diamonds), and 95% '
          'Student-t confidence intervals. Whole-phase means include pre-activation samples. '
          f'Bottom: first trial by identifier ({trial}), selected deterministically, not for effect size. '
          'Dashed line is the logged activation flag; measurements in that row can precede '
@@ -204,12 +250,12 @@ def figure_t3_mitigation(df, out_dir):
 def figure_detection(df, out_dir):
     if 'anomaly_detected' not in df:
         return
-    fig, axes = plt.subplots(1, 2, figsize=(7.16, 3.5), layout='constrained')
+    fig, axes = plt.subplots(1, 2, figsize=(PAGE_WIDTH, 3.3), layout='constrained')
     rates = df.copy()
     rates['alarm_pct'] = rates.anomaly_detected * 100
     summary(axes[0], rates, 'alarm_pct', T3, 'Samples flagged (%)')
     axes[0].set_xlim(-3, 103)
-    axes[0].set_title('(a) Alarm rate, including warm-up')
+    axes[0].set_title('(a) Sample alarm rate')
     for j, phase in enumerate(['attack_unmitigated', 'attack_mitigated']):
         delays, missed = [], 0
         for _, g in trial_segments(df[df.phase == phase]):
@@ -228,7 +274,6 @@ def figure_detection(df, out_dir):
     axes[1].set_ylim(0, max(6, axes[1].get_ylim()[1] * 1.3))
     axes[1].set_ylabel('First alarm delay (s)')
     axes[1].set_title('(b) Event detection by trial')
-    fig.suptitle('Logged detector behavior', fontsize=12)
     save(fig, out_dir, 'fig6_t2_detection',
          'Alarm rates include every sample, including detector warm-up. Dots and 95% '
          'Student-t intervals summarize per-trial rates. Delays are measured from the first '
@@ -258,47 +303,55 @@ def figure_t1_sweep(df, out_dir):
     else:
         return
 
-    n_cols = 3 if duty_phases else 2
-    fig, axes = plt.subplots(1, n_cols, figsize=(7.16 if n_cols == 2 else 10.5, 3.5),
-                             layout='constrained')
-    for ax, metric, label in zip(axes[:2], ['power_w', kernel_column(df)],
-                                 ['Recorded power (W)', 'Victim kernel time (ms)']):
+    n_rows = 2 if duty_phases else 1
+    fig, axes = plt.subplots(n_rows, 2, figsize=(PAGE_WIDTH, 2.65 * n_rows),
+                             squeeze=False, layout='constrained')
+
+    def sweep_panel(ax, values_x, phases, metric, ylabel, color, logarithmic=False):
         means, cis = [], []
-        for val, phase in zip(x, sweep_phases):
-            values = df[df.phase == phase].groupby('trial')[metric].mean().values
+        for val, phase in zip(values_x, phases):
+            values = df[df.phase == phase].groupby('trial')[metric].mean().dropna().values
             mean, ci = mean_ci(values)
             means.append(mean)
             cis.append(ci)
-            ax.scatter(np.repeat(val, len(values)), values, s=14, color='#0072B2', alpha=.4)
-        ax.errorbar(x, means, yerr=cis, fmt='o-', color='#0072B2', capsize=3, ms=4)
-        ax.set_xscale('log')
-        ax.set_xticks(x, [f'{v:g}' for v in x])
-        ax.tick_params(axis='x', rotation=45)
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(label)
-    axes[0].set_title('(a) Power vs frequency')
-    axes[1].set_title('(b) Latency vs frequency')
+            ax.scatter(np.repeat(val, len(values)), values, s=18,
+                       facecolors='white', edgecolors=color, linewidths=.8, zorder=3)
+        ax.errorbar(values_x, means, yerr=cis, fmt='D-', color=color,
+                    capsize=3, ms=4.5, lw=1.5, zorder=4)
+        if logarithmic:
+            ax.set_xscale('log')
+            ax.xaxis.set_major_locator(LogLocator(base=10, numticks=6))
+            ax.xaxis.set_major_formatter(FuncFormatter(
+                lambda v, _: f'{v/1000:g}k' if v >= 1000 else f'{v:g}'))
+            ax.xaxis.set_minor_locator(NullLocator())
+        else:
+            ax.set_xticks(values_x)
+        ax.yaxis.set_major_locator(MaxNLocator(4))
+        ax.set_ylabel(ylabel)
+        ax.grid(axis='x', visible=False)
+        ax.margins(x=.08, y=.15)
 
-    if duty_phases and n_cols > 2:
-        ax = axes[2]
+    for ax, metric, label, title in zip(axes[0], ['power_w', kernel_column(df)],
+            ['Recorded power (W)', 'Victim kernel time (ms)'],
+            ['(a) Frequency: power', '(b) Frequency: kernel time']):
+        sweep_panel(ax, x, sweep_phases, metric, label, '#0072B2', True)
+        ax.set_xlabel(x_label.replace('Pulsing', 'Configured pulse'))
+        ax.set_title(title if freq_phases else title.replace('Frequency', 'Pulse window'), loc='left')
+
+    if duty_phases:
         duty_x = np.array([int(p.replace('sweep_duty_', '').replace('pct', '')) for p in duty_phases])
-        for metric, color, label in [('power_w', '#D55E00', 'Power (W)'),
-                                     (kernel_column(df), '#0072B2', 'Latency (ms)')]:
-            means, cis = [], []
-            for d, phase in zip(duty_x, duty_phases):
-                values = df[df.phase == phase].groupby('trial')[metric].mean().values
-                mean, ci = mean_ci(values)
-                means.append(mean)
-                cis.append(ci)
-            ax.errorbar(duty_x, means, yerr=cis, fmt='o-', color=color, capsize=3, ms=4, label=label)
-        ax.set_xlabel('Duty cycle (%)')
-        ax.set_xticks(duty_x)
-        ax.legend(fontsize=7)
-        ax.set_title('(c) Duty-cycle effect')
+        for ax, metric, label, title in zip(axes[1], ['power_w', kernel_column(df)],
+                ['Recorded power (W)', 'Victim kernel time (ms)'],
+                ['(c) Duty cycle: power', '(d) Duty cycle: kernel time']):
+            sweep_panel(ax, duty_x, duty_phases, metric, label, '#D55E00')
+            ax.set_xlabel('Configured duty cycle (%)')
+            ax.set_title(title, loc='left')
 
-    fig.suptitle('Attack parameter sensitivity', fontsize=12)
     save(fig, out_dir, 'fig5_t1_sweep',
-         'Points summarize equally weighted trial means; error bars are 95% Student-t '
-         'confidence intervals. Faint dots are individual trials. Logarithmic x-axis '
-         'for frequency sweep. Duty-cycle sweep at fixed 10 kHz. '
-         'Connecting lines guide the eye and do not imply measurements between settings.')
+         'Open circles show individual trial means; diamonds show equally weighted means '
+         'of trial means with two-sided 95% Student-t confidence intervals. '
+         'The pulse-setting axis is logarithmic. Power and kernel time use separate axes '
+         'with explicit units. Connecting lines guide the eye, not fitted models. '
+         'Settings are configured values, not independently measured pulse frequencies. '
+         + ('Duty-cycle sweep uses the frequency configured in the experiment runner. '
+            if duty_phases else ''))
