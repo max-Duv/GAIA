@@ -446,9 +446,9 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
                     post_pow = post['power_w'].mean()
                     pre_lat = pre['victim_total_latency_ms'].mean()
                     post_lat = post['victim_total_latency_ms'].mean()
-                    lines.append(f"  Trial {trial}: power {pre_pow:.1f}W → {post_pow:.1f}W "
-                                 f"(Δ{pre_pow - post_pow:.1f}W), "
-                                 f"latency {pre_lat:.2f}ms → {post_lat:.2f}ms")
+                    lines.append(f"  Trial {trial}: power {pre_pow:.1f}W -> {post_pow:.1f}W "
+                                 f"(delta {pre_pow - post_pow:.1f}W), "
+                                 f"latency {pre_lat:.2f}ms -> {post_lat:.2f}ms")
 
             all_pre = term_data[term_data['terminated'] == 0]
             all_post = term_data[term_data['terminated'] == 1]

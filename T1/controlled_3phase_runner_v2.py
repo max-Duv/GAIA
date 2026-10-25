@@ -129,22 +129,56 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
         cuda_proc = None
 
         if temp_sync and p_mode is not None:
-            baseline_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
-            temp_threshold = baseline_temp + 0.5
-            print(f"    [temp-sync] Baseline temp: {baseline_temp}°C, threshold: >{temp_threshold}°C (delta=0.5°C), timeout=15s")
+            from gpu_fault_assessor_v2 import _cuda_subprocess_env
+
+            # Phase 1: Pre-heat GPU with a brief stress burst to elevate temp
+            print(f"    [temp-sync] Phase 1: Pre-heating GPU (5s stress burst)...")
+            preheat_cmd = [
+                cuda_binary, "--mode", "oversubscribe",
+                "--freq", "0.001", "--duty", "1.0", "--duration", "6"
+            ]
+            preheat_proc = subprocess.Popen(
+                preheat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=_cuda_subprocess_env()
+            )
+            time.sleep(5)
+            preheat_proc.terminate()
+            try:
+                preheat_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                preheat_proc.kill()
+            heated_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
+            print(f"    [temp-sync] Post-heat temp: {heated_temp:.1f}°C")
+
+            # Phase 2: Brief cooling period — no workload, GPU temp should decline
+            print(f"    [temp-sync] Phase 2: Cooling (3s idle)...")
+            time.sleep(3)
+            cooled_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
+            print(f"    [temp-sync] Post-cool temp: {cooled_temp:.1f}°C (dropped {heated_temp - cooled_temp:.1f}°C)")
+
+            # Phase 3: Start victim, detect thermal inflection
+            # GPU is cooling. Victim compute generates heat, causing temp to
+            # stop falling or rise — that inflection IS the side-channel signal.
+            print(f"    [temp-sync] Phase 3: Running victim, watching for thermal inflection...")
+            prev_temp = cooled_temp
+            temp_readings = [cooled_temp]
             sync_start = time.time()
             while (time.time() - sync_start) < 15.0:
                 assessor.run_victim_workload_iteration()
                 cur_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
-                if cur_temp > temp_threshold:
+                temp_readings.append(cur_temp)
+                if len(temp_readings) >= 3 and cur_temp >= prev_temp and prev_temp <= temp_readings[-3]:
                     elapsed_sync = time.time() - sync_start
-                    print(f"    [temp-sync] Temp rose to {cur_temp}°C after {elapsed_sync:.1f}s — launching synchronized attack")
+                    print(f"    [temp-sync] Thermal inflection: {prev_temp:.1f}°C -> {cur_temp:.1f}°C "
+                          f"after {elapsed_sync:.1f}s — launching synchronized attack")
                     temp_sync_trigger = "temp_triggered"
                     break
+                prev_temp = cur_temp
                 time.sleep(0.05)
             else:
                 cur_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
-                print(f"    [temp-sync] Timeout after 15s (temp: {cur_temp}°C) — launching attack")
+                print(f"    [temp-sync] Timeout after 15s (temp: {cur_temp:.1f}°C, "
+                      f"readings: {[f'{t:.1f}' for t in temp_readings[-5:]]})")
                 temp_sync_trigger = "timeout_triggered"
 
         if p_mode is not None and os.path.exists(cuda_binary):

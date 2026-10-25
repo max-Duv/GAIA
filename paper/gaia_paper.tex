@@ -193,11 +193,14 @@ across 10 independent trials, each with 15-second phases:
   cache+compute kernel modulated at 10\,kHz using CUDA
   \texttt{clock64()} busy-wait timing.
 \item \textbf{Temperature-synchronized stress}: 10\,kHz pulsed
-  attack launched only after detecting a $>$0.5\,$^\circ$C GPU
-  temperature rise (via thermal zone sysfs, 15\,s timeout),
-  demonstrating that user-level thermal side channels can
-  synchronize attack timing to victim computation.  Each trial
-  records whether the trigger was thermal or timeout.
+  attack launched upon detecting a \emph{thermal inflection}
+  indicating victim computation.  The GPU is first pre-heated with
+  a 5\,s stress burst, then cooled for 3\,s (no workload).  During
+  cooling, the victim kernel starts; when the GPU temperature stops
+  declining or rises---signaling the victim's thermal
+  footprint---the attack launches.  Temperature is read from the
+  thermal zone sysfs at millidegree precision.  Each trial records
+  whether the trigger was thermal or timeout (15\,s limit).
 \end{enumerate}
 
 A mechanism-isolation sweep additionally varies pulsing frequency

@@ -310,7 +310,7 @@ class GPUFaultAssessorV2:
             if res.get("gpu_temp_c", 0) == 0 and self._thermal_path:
                 try:
                     with open(os.path.join(self._thermal_path, 'temp')) as f:
-                        res["gpu_temp_c"] = int(f.read().strip()) // 1000
+                        res["gpu_temp_c"] = int(f.read().strip()) / 1000.0
                 except (IOError, OSError, ValueError):
                     pass
 
