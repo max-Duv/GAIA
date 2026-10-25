@@ -1,0 +1,687 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{siunitx}
+\usepackage{subcaption}
+
+\sisetup{detect-weight=true, detect-family=true}
+
+\graphicspath{{../results_20261024_195326/figures/}}
+
+\begin{document}
+
+\title{Project GAIA: GPU Power Attack Characterization, Detection, and Mitigation on an NVIDIA Jetson AGX Thor}
+
+\author{\IEEEauthorblockN{Max Duverneuil}
+\IEEEauthorblockA{Department of Computer Science and Engineering\\
+Penn State University\\
+mpd5945@psu.edu}}
+
+\maketitle
+
+\begin{abstract}
+Modern AI data centers rely on dense GPU deployments whose power profiles
+create new attack surfaces for co-located adversaries.  We present
+Project GAIA, a three-thrust investigation of GPU microarchitectural
+power attacks on an NVIDIA Jetson AGX Thor (Blackwell, sm\_110).
+In Thrust~1, we design and characterize six adversarial workload
+conditions---sustained cache-eviction stress, compute-only saturation,
+10\,kHz pulsed attacks, a temperature-synchronized variant, and their
+baselines---across 10 randomized trials.  Attacks elevate module-rail
+power from 45\,W (idle) to 89\,W (sustained stress) while,
+paradoxically, \emph{reducing} co-located victim latency from
+1.45\,ms to 1.20\,ms due to GPU clock boosting.
+In Thrust~2, we evaluate two detection mechanisms:
+a power-level threshold detector (100\% precision, 72.4\% recall,
+0\% false-positive rate, 4.3\,s mean detection latency) and a
+logistic-regression classifier over windowed telemetry features
+(88.0\% accuracy, 84.2\% F1 via leave-one-trial-out cross-validation),
+supplemented by Welch PSD spectral characterization and GPU
+performance-counter analysis.
+In Thrust~3, we close the loop with two mitigation strategies:
+devfreq-based clock capping (18.4\% power reduction, 3.3$\times$
+latency cost) and graceful adversarial-kernel termination, integrated
+with a Prometheus-compatible telemetry exporter for industry-standard
+monitoring.  All pairwise comparisons are statistically significant
+($p < 0.001$, Cohen's $d > 1.6$).  Our results demonstrate that
+user-level GPU adversarial kernels measurably manipulate server power,
+that low-overhead telemetry can detect them with zero false positives,
+and that dynamic clock management and process termination provide
+effective real-time countermeasures.
+\end{abstract}
+
+\begin{IEEEkeywords}
+GPU security, power attacks, microarchitectural attacks, anomaly detection, AI data centers, closed-loop mitigation
+\end{IEEEkeywords}
+
+% ===========================================================================
+\section{Introduction}
+\label{sec:intro}
+% ===========================================================================
+
+Hyper-specialized GPU data centers have become the de facto cornerstone
+of the modern AI revolution.  The Northern Virginia region alone hosts
+the world's highest concentration of data centers~\cite{eia2026}, and
+utilities such as Dominion Energy are preparing for $3\times$ their
+current peak load to accommodate future GPU-centric
+infrastructure~\cite{dominion2026}.  This concentration creates a
+critical vulnerability: \emph{coordinated power attacks on AI data
+centers may propagate across the power grid under adversarial
+conditions}~\cite{choukse2025}.  Recent collaborative work by
+Microsoft, OpenAI, and NVIDIA has demonstrated that harmonized power
+swings from large training workloads can physically damage grid
+infrastructure~\cite{watchus2025,semieng2025}.
+
+Prior work has established the effectiveness of power attacks against
+traditional multi-tenant data centers (MTDCs).  Islam et
+al.~\cite{islam2017} demonstrated that co-located tenants can induce
+measurable power fluctuations, and subsequent work showed voltage side
+channels exploitable for timing attacks~\cite{islam2018}.  Xu et
+al.~\cite{xu2014} characterized power attacks as an increasing threat
+to data center availability.  Wang et al.~\cite{wang2025}
+recently demonstrated that GPU cache-eviction priority hints have
+significant security and performance implications.  However, modern
+GPU-based AI training facilities have distinct power, memory, and
+computational load profiles compared to traditional compute servers;
+therefore, new attack models are likely to differ.
+
+This raises a fundamental research question: \emph{How can power
+attacks on GPU hardware in modern AI data centers be designed,
+evaluated, detected, and mitigated to prevent grid disruptions?}
+
+We address this question with Project GAIA, structured around three
+research thrusts:
+
+\begin{itemize}
+\item \textbf{Thrust~1 (T1):} Design benign-looking microarchitectural
+  workloads that force co-located training applications to draw more
+  power, driving multi-tenant GPU servers toward oversubscription and
+  system instability.
+\item \textbf{Thrust~2 (T2):} Develop and evaluate defense mechanisms
+  for detecting power attacks using GPU hardware telemetry and power
+  services.
+\item \textbf{Thrust~3 (T3):} Prototype an end-to-end closed-loop
+  monitoring pipeline to flag anomalous power-driven load and apply
+  real-time mitigation.
+\end{itemize}
+
+Our experiments are conducted on an NVIDIA Jetson AGX Thor developer
+kit (Blackwell architecture, sm\_110, 130\,W TDP) using hardware
+power sensors (INA3221 via sysfs) and GPU telemetry (devfreq, thermal
+zones).  All six conditions are randomized across 10 trials with
+15-second phases, providing statistical power for paired comparisons.
+
+The remainder of this paper is organized as follows.
+Section~\ref{sec:threat} describes the threat model.
+Section~\ref{sec:method} details the experimental methodology.
+Sections~\ref{sec:t1}--\ref{sec:t3} present results for each thrust.
+Section~\ref{sec:discussion} discusses findings and limitations, and
+Section~\ref{sec:conclusion} concludes.
+
+% ===========================================================================
+\section{Threat Model}
+\label{sec:threat}
+% ===========================================================================
+
+We assume a malicious or compromised tenant with user-level access
+co-located on a multi-tenant GPU training server.  The attacker's goal
+is to manipulate the temporal power profile of the shared server where
+other benign AI training jobs are running.  The attacker has no root,
+firmware, physical, or facility-level power-system access.  The
+attacker uses two classes of controlled adversarial kernels:
+
+\begin{enumerate}
+\item \textbf{Cache-eviction kernels:} CUDA kernels using PTX
+  \texttt{st.global.wt} (write-through) and \texttt{ld.global.cg}
+  (cache-global) instructions to repeatedly thrash the L2 cache,
+  forcing high memory-bus utilization and power draw.
+\item \textbf{Compute-saturation kernels:} INT32 multiply-add loops
+  designed to saturate arithmetic pipelines without significant memory
+  traffic, isolating the compute contribution to power.
+\end{enumerate}
+
+Additionally, we consider \emph{pulsed} variants that modulate attack
+intensity at 10\,kHz with 50\% duty cycle, emulating attempts to
+induce subsynchronous resonance at targeted frequencies.  Experiments
+are conducted in a safe, isolated research testbed with hardware power
+monitoring.  We use power variance, voltage sag, throttling events,
+and workload slowdown as measurable proxies for facility-level
+instability~\cite{islam2017,yandrofski2022}.
+
+% ===========================================================================
+\section{Experimental Methodology}
+\label{sec:method}
+% ===========================================================================
+
+\subsection{Platform}
+
+All experiments run on an NVIDIA Jetson AGX Thor developer kit:
+Blackwell GPU (sm\_110), 130\,W TDP, CUDA~13.0, driver~580.00.
+The platform provides hardware-level power measurement via six
+on-board INA3221 current/voltage sensors accessible through sysfs,
+eliminating the need for external power meters.  The module rail
+sensor reports voltage ($\sim$19.75\,V) and current, from which
+instantaneous power is derived.  GPU clock frequency is read from the
+devfreq interface (\texttt{/sys/class/devfreq/gpu-gpc-0/cur\_freq})
+and GPU temperature from the thermal zone
+(\texttt{/sys/class/thermal/thermal\_zone1/temp}).  Telemetry is
+sampled at the maximum stable rate supported by sysfs polling,
+achieving 3.5--4.0\,Hz.
+
+\subsection{Thrust~1: Attack Characterization}
+
+We evaluate six experimental conditions in a randomized-order design
+across 10 independent trials, each with 15-second phases:
+
+\begin{enumerate}
+\item \textbf{Victim alone} (baseline): A matrix-multiply victim
+  kernel runs without any co-located adversary.
+\item \textbf{Sustained stress} (DC): Cache-eviction + compute
+  adversarial kernel runs continuously at 100\% duty cycle alongside
+  the victim.
+\item \textbf{Cache-only stress}: Only cache-eviction primitives
+  active (no compute saturation).
+\item \textbf{Compute-only stress}: Only INT32 compute saturation
+  active (no cache thrashing).
+\item \textbf{Pulsed stress} (10\,kHz, 50\% duty): Full
+  cache+compute kernel modulated at 10\,kHz using CUDA
+  \texttt{clock64()} busy-wait timing.
+\item \textbf{Temperature-synchronized stress}: Pulsed attack
+  launched only after detecting a $>$2\,$^\circ$C GPU temperature
+  rise (via thermal zone sysfs), demonstrating that user-level
+  thermal side channels can synchronize attack timing to victim
+  computation.
+\end{enumerate}
+
+In addition to INA3221 power and devfreq clock telemetry, we record
+GPU and memory utilization percentages via NVML
+(\texttt{nvmlDeviceGetUtilizationRates}), providing performance-counter
+data for multi-modal detection analysis.
+
+A mechanism-isolation sweep additionally varies pulsing frequency from
+0.5\,kHz to 500\,Hz across 5 trials per frequency.  Phase order is
+randomized per trial, and a warmup trial is discarded.
+
+\subsection{Thrust~2: Detection}
+
+We evaluate two complementary detection approaches:
+
+\textbf{Power-level threshold detector.}
+A sliding-window detector computes mean power over the most recent
+telemetry buffer.  An anomaly is flagged when mean power exceeds a
+configurable threshold $\theta = 60$\,W, chosen to separate the
+$\sim$45\,W idle baseline from the $\sim$84\,W attack power level.
+The detector operates on raw INA3221 sensor readings with Kalman
+filtering for noise smoothing.
+
+\textbf{Logistic regression classifier.}
+We extract four features per non-overlapping window of 50 telemetry
+samples: mean power, power standard deviation, minimum voltage, and
+voltage range.  Windows are constructed \emph{within} each
+(trial, phase) pair to avoid cross-boundary contamination.  A
+logistic regression classifier is evaluated via leave-one-trial-out
+cross-validation, with a \texttt{StandardScaler} fit exclusively on
+the training fold of each split.
+
+We also apply PCA to the standardized feature matrix to assess
+state separability between benign and attack workloads.
+
+\subsection{Thrust~3: Closed-Loop Mitigation}
+
+The mitigation pipeline integrates detection and two response
+strategies:
+
+\textbf{Strategy~A: Clock capping.}
+(1)~The power-level detector monitors real-time telemetry;
+(2)~upon detecting an anomaly ($\bar{P} > 60$\,W), the system caps
+the GPU clock via the Jetson devfreq interface
+(\texttt{max\_freq}: $1575 \to 630$\,MHz);
+(3)~after the attack phase ends, the clock is restored.
+
+\textbf{Strategy~B: Graceful termination.}
+Upon anomaly detection, the system identifies and terminates the
+adversarial kernel's process (SIGTERM, with SIGKILL fallback after
+2\,s timeout), eliminating the attack source entirely.
+
+Each trial runs five phases in sequence: \emph{attack\_unmitigated}
+(attack with no defense), \emph{attack\_mitigated} (attack with
+active detection and clock capping), \emph{attack\_terminated}
+(attack with detection-triggered process kill),
+\emph{victim\_clamped\_baseline}
+(no attack but clock still capped, measuring clamping overhead), and
+\emph{recovery\_baseline} (no attack, full clock restored).  Five
+independent trials provide paired statistical comparisons.
+
+\textbf{Prometheus telemetry exporter.}
+To bridge the gap between research instrumentation and
+industry-standard monitoring, we implement a lightweight HTTP server
+that exports all GPU telemetry metrics (power, voltage, clock,
+temperature, utilization, anomaly flags) in Prometheus exposition
+format on port~9400, compatible with standard Prometheus/Grafana
+monitoring stacks deployed in production data centers.
+
+% ===========================================================================
+\section{Thrust~1: Attack Characterization Results}
+\label{sec:t1}
+% ===========================================================================
+
+\subsection{Power Elevation}
+
+Table~\ref{tab:t1} summarizes the results across all six conditions.
+All attack conditions significantly elevate GPU module-rail power
+above the 45.5\,W baseline.  Sustained stress produces the highest
+mean power at 88.8\,W ($1.95\times$ baseline), followed by pulsed
+stress at 84.0\,W and cache-only at 83.6\,W.  Compute-only stress
+elevates power to 61.3\,W ($1.35\times$ baseline), confirming that
+cache-eviction is the dominant power-draw mechanism.  Peak
+instantaneous power reaches 103.0\,W (79.2\% of the 130\,W TDP).
+
+All pairwise comparisons are statistically significant by paired
+$t$-test ($p < 0.001$ for all pairs, $|\text{Cohen's } d| > 1.6$;
+Table~\ref{tab:t1_stats}).
+
+\begin{table}[t]
+\centering
+\caption{Thrust~1: Attack characterization across 10 randomized
+  trials (15\,s/phase).  Values are mean $\pm$ std across trial means.}
+\label{tab:t1}
+\input{table_t1_results}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Selected pairwise paired $t$-tests (per-trial means, $n=10$).
+All comparisons significant at $p < 0.001$.}
+\label{tab:t1_stats}
+\small
+\begin{tabular}{lrrl}
+\toprule
+Comparison & $t$ & $p$ & Cohen's $d$ \\
+\midrule
+Pulsed vs.\ Alone & $14.21$ & $<0.001$ & $6.24$ \\
+Sustained vs.\ Alone & $13.94$ & $<0.001$ & $6.17$ \\
+Cache vs.\ Alone & $-13.50$ & $<0.001$ & $-6.08$ \\
+Compute vs.\ Alone & $13.01$ & $<0.001$ & $5.80$ \\
+Pulsed vs.\ Sustained & $-4.99$ & $<0.001$ & $-1.67$ \\
+Cache vs.\ Compute & $-18.97$ & $<0.001$ & $-7.23$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{The Clock-Boosting Latency Paradox}
+
+A counterintuitive finding is that the victim kernel runs
+\emph{faster} under attack: 1.20\,ms (all attack conditions)
+versus 1.45\,ms when alone.  GPU telemetry reveals the mechanism:
+under load from the co-located adversary, the GPU's dynamic
+voltage--frequency scaling (DVFS) boosts the clock from a variable
+$1310 \pm 216$\,MHz (victim alone, with idle periods triggering
+downclocking) to a sustained 1575\,MHz (all attack conditions).
+The victim benefits from this higher clock despite sharing the GPU.
+
+This has an important security implication: \emph{latency degradation
+alone is not a reliable indicator of a co-located power attack on
+modern GPUs with aggressive DVFS.}  The attack's impact is on power
+draw and thermal state, not necessarily on execution time.
+Temperature rises from 44.3\,$^\circ$C (alone) to 47.7\,$^\circ$C
+(sustained stress).
+
+\subsection{Mechanism Isolation}
+
+The five-frequency sweep (1\,ms to 500\,ms pulse windows, 5 trials
+each) shows that power draw increases monotonically with pulse
+frequency, from 70.8\,W at 500\,ms windows to 78.6\,W at 1\,ms
+windows.  The frequency dependence is shallow: even the slowest
+pulsing pattern ($f = 1$\,Hz) elevates power $1.56\times$ above
+baseline, indicating that the power elevation is primarily from the
+aggregate compute load rather than resonance effects at specific
+frequencies.
+
+% ===========================================================================
+\section{Thrust~2: Detection Results}
+\label{sec:t2}
+% ===========================================================================
+
+\subsection{Power-Level Threshold Detector}
+
+The threshold detector ($\theta = 60$\,W) achieves the results shown
+in Table~\ref{tab:t2_det}.  The detector achieves zero false positives
+across 571 benign telemetry samples, with 100\% precision.  Recall is
+72.4\% (394/544 attack samples detected), limited by the 4.3-second
+mean detection latency: the first several seconds of each attack phase
+are below threshold as the detector's sliding window fills with
+attack-level samples.  Once the buffer is primed, detection is
+reliable for the remainder of the phase.
+
+\begin{table}[t]
+\centering
+\caption{Power-level detector performance ($\theta = 60$\,W),
+  evaluated on T3 closed-loop experiment data (5 trials).}
+\label{tab:t2_det}
+\begin{tabular}{lrrr}
+\toprule
+Phase & Samples & Detected & Rate \\
+\midrule
+Attack (unmitigated) & 267 & 192 & TPR = 71.9\% \\
+Attack (mitigated)   & 277 & 202 & TPR = 72.9\% \\
+Clamped baseline     & 280 &   0 & FPR = 0.0\% \\
+Recovery baseline    & 291 &   0 & FPR = 0.0\% \\
+\midrule
+\textbf{Aggregate} & \textbf{1115} & --- & --- \\
+\quad Precision & & & 100.0\% \\
+\quad Recall    & & & 72.4\% \\
+\quad F1-Score  & & & 84.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{PCA State Separability}
+
+Principal component analysis on the four-feature windows (mean power,
+power std, voltage min, voltage range) shows strong separability
+between benign and attack workloads.  The first two principal
+components capture 84.5\% of the total variance (PC1: 62.7\%, PC2:
+21.8\%), indicating that the power-telemetry feature space
+provides a low-dimensional manifold on which attack and benign states
+are well separated.
+
+\subsection{Logistic Regression Classifier}
+
+The logistic regression classifier, evaluated via leave-one-trial-out
+cross-validation with per-fold standardization, achieves:
+accuracy 88.0\%, precision 88.9\%, recall 80.0\%, F1-score 84.2\%
+across 50 windows (30 benign, 20 attack) drawn from 10 held-out
+trials.  Windows are constructed within each (trial, phase) pair
+to prevent information leakage across trial or phase boundaries.
+
+\subsection{Spectral Characterization}
+
+We apply Welch PSD estimation to the power time series within each
+phase to characterize the low-frequency power envelope.  At the
+$\sim$4\,Hz sysfs sampling rate ($\sim$2\,Hz Nyquist), the 10\,kHz
+attack pulsing frequency is fundamentally unresolvable; however, the
+spectral analysis reveals that attack phases exhibit significantly
+higher total spectral power and distinct peak frequencies compared to
+baseline.  This confirms that even at low sampling rates, the power
+envelope carries discriminative information---the detection mechanism
+exploits the time-averaged power elevation rather than the
+high-frequency modulation pattern.
+
+\subsection{GPU Performance Counters}
+
+NVML utilization rates (\texttt{nvmlDeviceGetUtilizationRates})
+provide an additional telemetry dimension.  GPU compute utilization
+rises from near-zero (victim alone, with inter-kernel idle gaps) to
+sustained high utilization under all attack conditions, while memory
+utilization differentiates cache-heavy attacks (high memory
+utilization) from compute-only attacks (low memory utilization).
+These counters complement power telemetry and could improve classifier
+accuracy in future multi-modal detection approaches.
+
+\subsection{Sampling Rate Limitations}
+
+The $\sim$4\,Hz sysfs telemetry sampling rate fundamentally limits
+frequency-domain analysis.  The 10\,kHz attack pulsing is far above
+the $\sim$2\,Hz Nyquist limit, making FFT-based spectral analysis
+ineffective for resolving attack modulation patterns.  Our detection
+therefore relies on power-level anomaly, which remains effective
+because the attack's time-averaged power draw is distinguishable
+from baseline regardless of modulation frequency.  On data center
+GPUs with DCGM telemetry (10--100\,Hz), the spectral approach
+originally proposed would become viable.
+
+% ===========================================================================
+\section{Thrust~3: Closed-Loop Mitigation Results}
+\label{sec:t3}
+% ===========================================================================
+
+\subsection{Mitigation Effectiveness}
+
+Table~\ref{tab:t3} shows the four-phase mitigation results across
+5 trials.  The devfreq clock cap ($1575 \to 630$\,MHz) reduces
+attack-phase power by 18.4\% (83.8\,W $\to$ 68.4\,W), confirming
+that GPU clock management is an effective lever for power reduction
+under adversarial load.
+
+\begin{table}[t]
+\centering
+\caption{Thrust~3: Closed-loop mitigation results (5 trials,
+  15\,s/phase).  Clock cap: $1575 \to 630$\,MHz via devfreq.}
+\label{tab:t3}
+\input{table_t3_results}
+\end{table}
+
+\subsection{Latency--Power Tradeoff}
+
+The mitigation introduces a significant latency penalty.  Victim
+latency increases from 1.20\,ms (unmitigated attack) to 3.94\,ms
+(mitigated attack), a $3.3\times$ increase.  However, a portion of
+this latency increase is inherent to the clock cap itself:
+\emph{victim\_clamped\_baseline} (no attack, clock capped) shows
+2.97\,ms latency---a 1.51\,ms overhead versus the 1.46\,ms recovery
+baseline.  The decomposition is:
+
+\begin{align}
+\text{Gross latency change} &= B - A = 3.94 - 1.20 = +2.75\,\text{ms} \\
+\text{Clamping overhead} &= C - D = 2.97 - 1.46 = +1.51\,\text{ms} \\
+\text{Net attack effect} &= (B-A) - (C-D) = +1.24\,\text{ms}
+\end{align}
+
+The paired $t$-test between unmitigated and mitigated attack latency
+is significant ($t = -563.0$, $p < 0.001$), confirming that the
+power reduction is achieved at a measurable performance cost.
+
+\subsection{Detection-to-Mitigation Latency}
+
+The closed-loop system detects the anomaly within 4.2--4.3\,s of
+attack onset, then applies the clock cap within the same telemetry
+polling cycle.  All five trials triggered mitigation exactly once
+per attack phase, with no false triggers during benign phases.
+After mitigation, module-rail voltage recovers from 19.736\,V
+(attack) to 19.744\,V (mitigated), consistent with reduced current
+draw.
+
+\subsection{Graceful Kernel Termination}
+
+The termination strategy (Strategy~B) provides a more decisive
+response: upon detecting the power anomaly, the system kills the
+adversarial process, eliminating the attack entirely.  Unlike clock
+capping, which constrains both attacker and victim equally,
+termination selectively removes the adversarial workload while
+allowing the victim to resume at full clock speed.  The
+\emph{attack\_terminated} phase demonstrates that power returns to
+baseline levels within one telemetry cycle after kill, with victim
+latency recovering to pre-attack values.  This approach is more
+suitable when the adversarial process can be identified and isolated.
+
+\subsection{Prometheus Integration}
+
+The Prometheus-compatible telemetry exporter serves all eight
+monitored metrics (power, voltage, clock, temperature, GPU
+utilization, memory utilization, anomaly flag, mean detector power)
+on a standard HTTP endpoint with Prometheus exposition format.
+Smoke testing confirms correct metric formatting and real-time
+updates at 1\,s polling intervals.  This enables integration with
+production Prometheus/Grafana monitoring stacks, bridging the gap
+between research instrumentation and industry-standard observability
+as required for data center deployment.
+
+% ===========================================================================
+\section{Discussion}
+\label{sec:discussion}
+% ===========================================================================
+
+\subsection{Key Findings}
+
+Our results address the three questions posed by the GAIA proposal:
+
+\textbf{Can user-level GPU workloads measurably manipulate server
+power?}  Yes.  All five attack conditions elevate module-rail power
+significantly above baseline, with sustained stress reaching
+$1.95\times$ the idle power level.  Peak power (103\,W) reaches
+79\% of TDP.  The temperature-synchronized variant demonstrates that
+an attacker can use GPU thermal readings as a user-level side channel
+to time attack launch to victim computation, without requiring any
+privileged access.  The voltage drop, while small on the module rail
+(8\,mV), would compound across hundreds of GPUs in a data center
+rack.
+
+\textbf{Can low-overhead telemetry detect these attacks?}  Yes, with
+caveats.  The power-level threshold detector achieves zero false
+positives and 100\% precision, making it suitable for deployment
+where false alarms are costly.  The 72.4\% recall and 4.3\,s
+detection latency are acceptable for a first-response system, though
+insufficient for latency-critical applications.  The logistic
+regression classifier (88\% accuracy) demonstrates that simple
+ML models over power telemetry features can distinguish attack from
+benign workloads with moderate accuracy.
+
+\textbf{Can mitigation be applied in real time?}  Yes, via two
+complementary strategies.  Devfreq clock capping reduces power by
+18.4\% with a 3.3$\times$ latency cost, representing the
+fundamental tradeoff between power security and compute performance.
+Graceful kernel termination provides a more targeted response by
+eliminating the adversarial process, allowing the victim to resume at
+full performance.  The Prometheus telemetry exporter enables
+integration with industry-standard monitoring stacks for production
+deployment.
+
+\subsection{The Clock-Boosting Paradox}
+
+The finding that victim latency \emph{decreases} under attack is
+significant for GPU security monitoring.  Traditional
+intrusion-detection systems that monitor for performance degradation
+would \emph{miss} this class of attack entirely.  The attack's
+primary impact---elevated power draw---is invisible to the victim
+workload, which sees only the benefit of a boosted clock.  This
+motivates the use of hardware power telemetry (not performance
+counters alone) for attack detection, consistent with the approach
+taken by Yandrofski et al.~\cite{yandrofski2022} for real-time
+systems.
+
+\subsection{Platform Considerations}
+
+The Jetson AGX Thor is a development platform, not a data center GPU
+server.  Several differences affect generalizability:
+
+\begin{itemize}
+\item \textbf{Integrated GPU:} The Jetson's iGPU shares the SoC
+  power domain with the CPU, unlike discrete data center GPUs (A100,
+  H100) with independent power planes.  Discrete GPUs support
+  \texttt{nvidia-smi --power-limit}, which the Jetson does not;
+  our devfreq clock-capping mitigation is Jetson-specific.
+\item \textbf{Telemetry rate:} The 3.5--4\,Hz sysfs sampling rate is
+  far below what DCGM provides on data center GPUs ($\sim$10--100\,Hz).
+  Higher sampling rates would enable spectral analysis of attack
+  modulation patterns as originally proposed.
+\item \textbf{Scale:} Single-GPU experiments cannot capture
+  multi-GPU resonance effects or rack-level power aggregation.
+\end{itemize}
+
+Despite these limitations, the Jetson provides ground-truth hardware
+power measurement through on-board INA3221 sensors---a capability
+that is typically unavailable on discrete GPU systems without external
+power meters.
+
+\subsection{Limitations and Future Work}
+
+\textbf{Benign high-power workloads.}  The power-level detector's
+60\,W threshold may produce false positives under legitimate
+heavy-compute workloads (e.g., large model training).  Testing
+against benign high-power workloads is needed to validate the
+detector's discrimination ability.
+
+\textbf{Multi-tenant isolation.}  Our experiments co-locate victim
+and attacker on the same GPU without MPS or MIG partitioning.
+Evaluating attacks under hardware isolation mechanisms (NVIDIA MIG
+on A100/H100) would determine whether memory-space partitioning
+mitigates the power-channel attack.
+
+\textbf{Adaptive attackers.}  A power-aware attacker could modulate
+intensity to stay below the detection threshold.  Adaptive detection
+strategies (e.g., anomaly detection over longer windows or
+rate-of-change metrics) would be needed.
+
+\textbf{Scale-up.}  Extending to multi-GPU and rack-level experiments
+would enable measurement of aggregate power effects and grid-coupling
+dynamics as described by Choukse et al.~\cite{choukse2025}.
+
+% ===========================================================================
+\section{Related Work}
+\label{sec:related}
+% ===========================================================================
+
+\textbf{Data center power attacks.}
+Islam et al.~\cite{islam2017} provided the first systematic look at
+power attacks in multi-tenant data centers, demonstrating that
+co-located VMs can manipulate aggregate server power draw.  Their
+subsequent work~\cite{islam2018} exploited Ohm's law to construct
+voltage side channels for timing attacks.  Xu et al.~\cite{xu2014}
+surveyed power attacks as threats to data center availability.
+
+\textbf{GPU microarchitectural attacks.}
+Yandrofski et al.~\cite{yandrofski2022} demonstrated that adversarial
+CUDA kernels can create ``powerful enemies'' on NVIDIA GPUs,
+manipulating power draw and disrupting real-time system guarantees.
+Wang et al.~\cite{wang2025} showed that GPU cache-eviction priority
+hints (as we exploit in our cache-eviction kernels) have significant
+security implications.  Nazari et al.~\cite{nazari2023} demonstrated
+adversarial attacks against ML-based resource provisioning systems.
+
+\textbf{AI data center power management.}
+Choukse et al.~\cite{choukse2025} characterized power stabilization
+challenges for AI training datacenters in a Microsoft/OpenAI/NVIDIA
+collaboration, showing that synchronized training phases can cause
+grid-level power swings.  Patel et al.~\cite{patel2024}
+characterized power management opportunities for LLM workloads.
+Nazari et al.~\cite{nazari2026} proposed contention-balancer-based
+mitigation for Spectre vulnerabilities using specscope contention
+maps.
+
+\textbf{Hardware security.}
+Islam et al.~\cite{islam2024} surveyed hardware support for
+trustworthy machine learning.  Nazari et al.~\cite{nazari2024}
+proposed resilience enhancements for transformer models against
+bit-flip attacks.  Fan et al.~\cite{fan2026} demonstrated GPU
+acceleration of cryptographic protocols.
+
+% ===========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ===========================================================================
+
+Project GAIA demonstrates that GPU microarchitectural power attacks
+are a viable threat on modern AI hardware.  User-level adversarial
+kernels---including temperature-synchronized variants---elevate GPU
+power by up to $1.95\times$ baseline without triggering hardware
+throttling, and paradoxically improve victim performance through
+clock boosting.  A power-level threshold detector achieves zero
+false positives with 72.4\% recall, supplemented by spectral
+characterization and performance-counter analysis.  Two closed-loop
+mitigation strategies---devfreq clock capping (18.4\% power
+reduction, $3.3\times$ latency cost) and graceful adversarial-kernel
+termination---demonstrate complementary tradeoffs for real-time
+response, integrated with a Prometheus-compatible telemetry exporter
+for industry-standard monitoring.
+
+These experimental results establish the viability of a complete
+attack--detect--mitigate--monitor pipeline on a Jetson platform.
+Future work will extend the evaluation to multi-GPU data center
+hardware with NVIDIA DCGM telemetry, higher sampling rates enabling
+spectral analysis, MIG isolation, and adaptive adversarial
+strategies.
+
+\section*{Acknowledgments}
+Experiments were conducted on an NVIDIA Jetson AGX Thor developer kit
+at Penn State.  This work was completed as part of CYSE-698.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

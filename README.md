@@ -1,5 +1,35 @@
 # Project GAIA: Securing AI Data Centers Against Power Attacks
 
+## Revised paper figures
+
+Generate the current figure set without changing the original reports or figures:
+
+```bash
+python analyze_results.py results_20261024_181552 --figures-only --out-dir results_20261024_181552/figures_revised
+```
+
+Replace the results directory for each new run. `publication_figures.py` owns the
+plotting style and figure definitions. Outputs include 300-dpi PNGs, vector PDFs,
+and a caption text file for each figure. The standard analysis command also uses
+this renderer; without `--figures-only`, it additionally regenerates the existing
+metrics report and LaTeX tables.
+
+- Figure 1: power and measured rail voltage, aligned within each condition;
+  separate lines for trials, without joining timestamp resets.
+- Figure 2: condition-level kernel time and power, with trial means and 95%
+  Student-t confidence intervals across trials.
+- Figure 3: descriptive power features and achieved sampling rates. This replaces
+  the former concatenated spectrogram/PCA display; it is not classifier validation.
+- Figure 4: power/performance comparisons and the first trial's response timeline.
+- Figure 5: sweep results on a logarithmic configured-window axis.
+- Figure 6: recorded detector alarm rates, first-alarm delays, and missed events.
+
+No assumed TDP or 120% threshold is drawn. `--tdp WATTS` optionally adds a
+user-specified power reference; verify that it applies to the measured rail.
+Figures use logged values and do not validate sensor provenance, actual pulse
+timing, or hardware enforcement. Use the caption files when interpreting each
+figure. Historical runs retain their original acquisition limitations.
+
 **CYSE 698 | SPIRE LAB 2026 | Max Duverneuil**
 
 This directory contains all code needed to reproduce the experiments described in the Proposed Research Project. Each script maps to a specific task, metric, and deliverable from the proposal.

@@ -58,8 +58,9 @@ echo "[info] System info saved to $RESULTS_DIR/system_info.txt"
 # =============================================================================
 echo ""
 echo "====================================================================="
-echo "  THRUST 1: 5-Condition Controlled Experiment (${TRIALS} trials)"
-echo "  Conditions: alone, sustained_stress, cache_only, compute_only, pulsed_stress"
+echo "  THRUST 1: 6-Condition Controlled Experiment (${TRIALS} trials)"
+echo "  Conditions: alone, sustained_stress, cache_only, compute_only,"
+echo "              pulsed_stress, temp_sync_stress"
 echo "====================================================================="
 
 cd "$GAIA_DIR/T1"
@@ -154,6 +155,28 @@ python3 T3/closed_loop_mitigator_v2.py \
     --out "$RESULTS_DIR/t3_closed_loop_mitigation.csv"
 
 echo "[T3] Complete."
+
+# =============================================================================
+# THRUST 3b: Prometheus Telemetry Exporter (smoke test)
+# =============================================================================
+echo ""
+echo "====================================================================="
+echo "  THRUST 3b: Prometheus Exporter Smoke Test"
+echo "====================================================================="
+
+echo "[T3b] Starting Prometheus exporter on port 9400 (background)..."
+python3 T3/prometheus_exporter.py --port 9400 --interval 0.5 &
+EXPORTER_PID=$!
+sleep 3
+
+echo "[T3b] Scraping /metrics endpoint..."
+curl -s http://localhost:9400/metrics > "$RESULTS_DIR/prometheus_metrics_sample.txt" 2>/dev/null || echo "[T3b] WARNING: curl failed"
+
+echo "[T3b] Scraping /json endpoint..."
+curl -s http://localhost:9400/json > "$RESULTS_DIR/prometheus_json_sample.json" 2>/dev/null || echo "[T3b] WARNING: curl failed"
+
+kill $EXPORTER_PID 2>/dev/null || true
+echo "[T3b] Exporter stopped. Samples saved."
 
 # =============================================================================
 # Summary

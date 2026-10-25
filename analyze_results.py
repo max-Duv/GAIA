@@ -17,18 +17,13 @@ import sys
 import argparse
 import numpy as np
 import pandas as pd
-import scipy.signal as signal
 from scipy.stats import ttest_rel
+from scipy import signal
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import LeaveOneOut
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 
 def load_csv(results_dir, filename):
@@ -49,413 +44,11 @@ def compute_cohens_d(x, y):
     return (np.mean(x) - np.mean(y)) / pooled_std
 
 
-# =============================================================================
-# Figure 1: T1 4-Panel Power Characterization (IEEE format)
-# =============================================================================
-def figure_t1_power_characterization(df, out_dir, tdp_w=80.0):
-    print("\n[Fig 1] T1 Power Characterization (4-panel IEEE)")
-
-    plt.rcParams.update({'font.size': 9, 'font.family': 'serif'})
-    fig, axs = plt.subplots(4, 1, figsize=(7.16, 9), sharex=False)
-    plt.subplots_adjust(hspace=0.42)
-
-    phase_colors = {
-        'victim_alone': ('#27ae60', 'Baseline (Victim Alone)'),
-        'victim_sustained_stress': ('#2980b9', 'Sustained Stress (DC)'),
-        'victim_cache_only': ('#8e44ad', 'Cache-Only Stress'),
-        'victim_compute_only': ('#f39c12', 'Compute-Only Stress'),
-        'victim_pulsed_stress': ('#c0392b', '10 kHz Pulsed Attack'),
-        'victim_matched_benign': ('#2980b9', 'Matched Benign Stress'),
-    }
-
-    for phase_name, (color, label) in phase_colors.items():
-        mask = df['phase'] == phase_name
-        if not mask.any():
-            continue
-        sub = df[mask]
-        axs[0].plot(sub['timestamp'], sub['power_w'], color=color, linewidth=0.8, alpha=0.85, label=label)
-
-    axs[0].axhline(y=tdp_w, color='gray', linestyle='--', linewidth=1.0, label=f'TDP ({tdp_w:.0f} W)')
-    axs[0].axhline(y=tdp_w * 1.2, color='orange', linestyle=':', linewidth=1.0, label=f'120% Limit ({tdp_w*1.2:.0f} W)')
-    axs[0].set_title("(a) GPU Power Draw Across Experimental Conditions", fontweight='bold')
-    axs[0].set_ylabel("Power (W)")
-    axs[0].legend(fontsize=7, loc='upper right', frameon=True, fancybox=False, edgecolor='gray')
-    axs[0].grid(True, linestyle=':', alpha=0.5)
-
-    for phase_name, (color, label) in phase_colors.items():
-        mask = df['phase'] == phase_name
-        if not mask.any():
-            continue
-        sub = df[mask]
-        axs[1].plot(sub['timestamp'], sub['voltage_v'], color=color, linewidth=0.8, alpha=0.85, label=label)
-
-    axs[1].set_title("(b) PDN Voltage Response ($V_{core} = V_{nom} - IR - L \\frac{di}{dt}$)", fontweight='bold')
-    axs[1].set_ylabel("Voltage (V)")
-    axs[1].legend(fontsize=7, loc='lower right', frameon=True, fancybox=False, edgecolor='gray')
-    axs[1].grid(True, linestyle=':', alpha=0.5)
-
-    for phase_name, (color, label) in phase_colors.items():
-        mask = df['phase'] == phase_name
-        if not mask.any():
-            continue
-        sub = df[mask]
-        axs[2].plot(sub['timestamp'], sub['di_dt_amps_per_sec'], color=color, linewidth=0.7, alpha=0.8, label=label)
-
-    axs[2].set_title("(c) Current Switching Transients ($di/dt$)", fontweight='bold')
-    axs[2].set_ylabel("$di/dt$ (A/s)")
-    axs[2].legend(fontsize=7, loc='upper right', frameon=True, fancybox=False, edgecolor='gray')
-    axs[2].grid(True, linestyle=':', alpha=0.5)
-
-    for phase_name, (color, label) in phase_colors.items():
-        mask = df['phase'] == phase_name
-        if not mask.any():
-            continue
-        sub = df[mask]
-        p_vals = sub['power_w'].values
-        if len(p_vals) < 32:
-            continue
-        dt_mean = np.mean(np.diff(sub['timestamp'].values))
-        fs = 1.0 / dt_mean if dt_mean > 0 else 20.0
-        nperseg = min(len(p_vals), 256)
-        freqs, psd = signal.welch(p_vals, fs=fs, nperseg=nperseg)
-        axs[3].semilogy(freqs, psd, color=color, linewidth=1.0, alpha=0.85, label=label)
-
-    axs[3].set_title("(d) Power Spectral Density by Condition", fontweight='bold')
-    axs[3].set_xlabel("Frequency (Hz)")
-    axs[3].set_ylabel("PSD ($W^2$/Hz)")
-    axs[3].legend(fontsize=7, loc='upper right', frameon=True, fancybox=False, edgecolor='gray')
-    axs[3].grid(True, linestyle=':', alpha=0.5)
-
-    plt.savefig(os.path.join(out_dir, "fig1_t1_power_characterization.png"), dpi=300, bbox_inches='tight')
-    plt.savefig(os.path.join(out_dir, "fig1_t1_power_characterization.pdf"), bbox_inches='tight')
-    plt.close()
-    print("  [saved] fig1_t1_power_characterization.{png,pdf}")
-
-
-# =============================================================================
-# Figure 2: T1 Victim Latency Degradation (box + strip)
-# =============================================================================
-def figure_t1_latency_degradation(df, out_dir):
-    print("\n[Fig 2] T1 Victim Latency by Condition")
-
-    plt.rcParams.update({'font.size': 9, 'font.family': 'serif'})
-
-    all_phases = [p for p in df['phase'].unique() if not p.startswith('sweep_')]
-    short_labels = {
-        'victim_alone': 'Baseline',
-        'victim_sustained_stress': 'Sustained',
-        'victim_cache_only': 'Cache',
-        'victim_compute_only': 'Compute',
-        'victim_pulsed_stress': 'Pulsed',
-        'victim_matched_benign': 'Benign',
-    }
-    color_map = {
-        'victim_alone': '#27ae60',
-        'victim_sustained_stress': '#2980b9',
-        'victim_cache_only': '#8e44ad',
-        'victim_compute_only': '#f39c12',
-        'victim_pulsed_stress': '#c0392b',
-        'victim_matched_benign': '#2980b9',
-    }
-    present = [p for p in all_phases if not df[df['phase'] == p].empty]
-    labels = [short_labels.get(p, p.replace('victim_', '')) for p in present]
-    colors = [color_map.get(p, '#888888') for p in present]
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 3.5), gridspec_kw={'width_ratios': [2, 1]})
-
-    data_groups = [df[df['phase'] == pn]['victim_total_latency_ms'].values for pn in present]
-
-    bp = ax1.boxplot(data_groups, labels=labels, patch_artist=True, widths=0.5,
-                     medianprops=dict(color='black', linewidth=1.5))
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.6)
-
-    ax1.set_ylabel("Victim Kernel Time (ms)")
-    ax1.set_title("(a) Victim Workload Kernel Time Distribution", fontweight='bold')
-    ax1.grid(True, axis='y', linestyle=':', alpha=0.5)
-
-    trial_means = {}
-    for pn in present:
-        trial_means[pn] = df[df['phase'] == pn].groupby('trial')['victim_total_latency_ms'].mean().values
-
-    x = np.arange(len(present))
-    means = [np.mean(trial_means[pn]) for pn in present]
-    stds = [np.std(trial_means[pn], ddof=1) if len(trial_means[pn]) > 1 else 0 for pn in present]
-    ax2.bar(x, means, yerr=stds, capsize=4, color=colors, alpha=0.7, edgecolor='gray')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(labels, fontsize=7, rotation=30, ha='right')
-    ax2.set_ylabel("Mean Kernel Time (ms)")
-    ax2.set_title("(b) Per-Trial Means +/- SD", fontweight='bold')
-    ax2.grid(True, axis='y', linestyle=':', alpha=0.5)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "fig2_t1_latency_degradation.png"), dpi=300, bbox_inches='tight')
-    plt.savefig(os.path.join(out_dir, "fig2_t1_latency_degradation.pdf"), bbox_inches='tight')
-    plt.close()
-    print("  [saved] fig2_t1_latency_degradation.{png,pdf}")
-
-
-# =============================================================================
-# Figure 3: T2 Defense Diagnostics (Kalman + Spectrogram + PCA)
-# =============================================================================
-def figure_t2_defense_diagnostics(df, out_dir):
-    print("\n[Fig 3] T2 Defense Diagnostics (Kalman + Spectrogram + PCA)")
-
-    plt.rcParams.update({'font.size': 9, 'font.family': 'serif'})
-    fig, axs = plt.subplots(3, 1, figsize=(7.16, 9), gridspec_kw={'height_ratios': [1, 1.2, 1.2]})
-    plt.subplots_adjust(hspace=0.45)
-
-    x_est, p_est = 0.0, 1.0
-    Q, R_cov = 1e-3, 1e-1
-    kalman_filtered = []
-    for val in df['power_w'].values:
-        p_pred = p_est + Q
-        k_gain = p_pred / (p_pred + R_cov)
-        x_est = x_est + k_gain * (val - x_est)
-        p_est = (1.0 - k_gain) * p_pred
-        kalman_filtered.append(x_est)
-
-    phase_color_map = {
-        'victim_alone': '#27ae60',
-        'victim_sustained_stress': '#2980b9',
-        'victim_cache_only': '#8e44ad',
-        'victim_compute_only': '#f39c12',
-        'victim_pulsed_stress': '#c0392b',
-        'victim_matched_benign': '#2980b9',
-    }
-    for phase_name, color in phase_color_map.items():
-        mask = df['phase'] == phase_name
-        if mask.any():
-            sub = df[mask]
-            axs[0].plot(sub['timestamp'], sub['power_w'], color=color, alpha=0.25, linewidth=0.5)
-
-    axs[0].plot(df['timestamp'], kalman_filtered, color='#2c3e50', linewidth=1.2, label='Kalman Filtered')
-    axs[0].set_title("(a) Raw Power Telemetry & Kalman Filter Smoothing", fontweight='bold')
-    axs[0].set_ylabel("Power (W)")
-    axs[0].legend(fontsize=7)
-    axs[0].grid(True, linestyle=':', alpha=0.5)
-
-    dt_mean = np.mean(np.diff(df['timestamp'].values))
-    fs_est = 1.0 / dt_mean if dt_mean > 0 else 20.0
-    nperseg = min(len(df), 128)
-    freqs, times, Sxx = signal.spectrogram(
-        df['power_w'].values, fs=fs_est,
-        nperseg=nperseg, noverlap=nperseg // 2
-    )
-    Sxx_db = 10 * np.log10(Sxx + 1e-10)
-
-    pcm = axs[1].pcolormesh(times, freqs, Sxx_db, shading='gouraud', cmap='viridis')
-    axs[1].set_title("(b) Power Envelope Spectrogram (STFT)", fontweight='bold')
-    axs[1].set_ylabel("Frequency (Hz)")
-    fig.colorbar(pcm, ax=axs[1], label='Power (dB)')
-    axs[1].text(0.01, 0.95, f"$f_s$={fs_est:.1f} Hz | Nyquist={fs_est/2:.1f} Hz",
-                transform=axs[1].transAxes, fontsize=7, va='top',
-                bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.8))
-
-    label_binary = df['phase'].apply(
-        lambda x: 1 if 'stress' in str(x).lower() or 'pulsed' in str(x).lower() else 0
-    ).values
-    window_size = min(len(df) // 10, 50)
-    if window_size < 5:
-        window_size = 5
-
-    features, labels = [], []
-    for i in range(0, len(df) - window_size, window_size):
-        sub = df.iloc[i:i+window_size]
-        features.append([
-            sub['power_w'].mean(),
-            sub['power_w'].std(),
-            sub['voltage_v'].min(),
-            sub['voltage_v'].max() - sub['voltage_v'].min()
-        ])
-        labels.append(1 if label_binary[i:i+window_size].mean() > 0.5 else 0)
-
-    features = np.array(features)
-    labels = np.array(labels)
-
-    if len(features) > 2:
-        scaler = StandardScaler()
-        projected = PCA(n_components=2).fit_transform(scaler.fit_transform(features))
-        benign_mask = labels == 0
-        attack_mask = labels == 1
-        axs[2].scatter(projected[benign_mask, 0], projected[benign_mask, 1],
-                       c='#27ae60', label='Benign', alpha=0.7, edgecolors='none', s=30)
-        axs[2].scatter(projected[attack_mask, 0], projected[attack_mask, 1],
-                       c='#9b59b6', label='Attack', alpha=0.7, edgecolors='none', s=30)
-
-    axs[2].set_title("(c) PCA Feature Space Projection (Workload State Separability)", fontweight='bold')
-    axs[2].set_xlabel("PC1")
-    axs[2].set_ylabel("PC2")
-    axs[2].legend(fontsize=7)
-    axs[2].grid(True, linestyle=':', alpha=0.5)
-
-    plt.savefig(os.path.join(out_dir, "fig3_t2_defense_diagnostics.png"), dpi=300, bbox_inches='tight')
-    plt.savefig(os.path.join(out_dir, "fig3_t2_defense_diagnostics.pdf"), bbox_inches='tight')
-    plt.close()
-    print("  [saved] fig3_t2_defense_diagnostics.{png,pdf}")
-
-
-# =============================================================================
-# Figure 4: T3 Closed-Loop Mitigation Results
-# =============================================================================
-def figure_t3_mitigation(df, out_dir):
-    print("\n[Fig 4] T3 Closed-Loop Mitigation")
-
-    plt.rcParams.update({'font.size': 9, 'font.family': 'serif'})
-    fig, axs = plt.subplots(2, 2, figsize=(7.16, 5.5))
-    plt.subplots_adjust(hspace=0.45, wspace=0.35)
-
-    phase_order = ['attack_unmitigated', 'attack_mitigated', 'victim_clamped_baseline', 'recovery_baseline']
-    phase_labels = ['Unmitigated\nAttack', 'Mitigated\nAttack', 'Clamped\nBaseline', 'Recovery\nBaseline']
-    colors = ['#c0392b', '#e67e22', '#2980b9', '#27ae60']
-
-    # (a) Latency per phase
-    data_groups = [df[df['phase'] == pn]['victim_total_latency_ms'].values for pn in phase_order]
-    bp = axs[0, 0].boxplot(data_groups, labels=phase_labels, patch_artist=True, widths=0.5,
-                            medianprops=dict(color='black', linewidth=1.5))
-    for patch, c in zip(bp['boxes'], colors):
-        patch.set_facecolor(c)
-        patch.set_alpha(0.6)
-    axs[0, 0].set_ylabel("Latency (ms)")
-    axs[0, 0].set_title("(a) Victim Latency by Phase", fontweight='bold', fontsize=9)
-    axs[0, 0].grid(True, axis='y', linestyle=':', alpha=0.5)
-    axs[0, 0].tick_params(axis='x', labelsize=7)
-
-    # (b) Power per phase
-    data_groups = [df[df['phase'] == pn]['power_w'].values for pn in phase_order]
-    bp = axs[0, 1].boxplot(data_groups, labels=phase_labels, patch_artist=True, widths=0.5,
-                            medianprops=dict(color='black', linewidth=1.5))
-    for patch, c in zip(bp['boxes'], colors):
-        patch.set_facecolor(c)
-        patch.set_alpha(0.6)
-    axs[0, 1].set_ylabel("Power (W)")
-    axs[0, 1].set_title("(b) GPU Power Draw by Phase", fontweight='bold', fontsize=9)
-    axs[0, 1].grid(True, axis='y', linestyle=':', alpha=0.5)
-    axs[0, 1].tick_params(axis='x', labelsize=7)
-
-    # (c) Mitigation decomposition bar chart
-    trial_means = {}
-    for pn in phase_order:
-        trial_means[pn] = df[df['phase'] == pn].groupby('trial')['victim_total_latency_ms'].mean().values
-
-    if all(pn in trial_means and len(trial_means[pn]) >= 1 for pn in phase_order):
-        A = np.mean(trial_means['attack_unmitigated'])
-        B = np.mean(trial_means['attack_mitigated'])
-        C = np.mean(trial_means['victim_clamped_baseline'])
-        D = np.mean(trial_means['recovery_baseline'])
-        gross = A - B
-        overhead = C - D
-        net = gross - overhead
-
-        bars = axs[1, 0].bar(
-            ['Gross\nBenefit\n(A−B)', 'Clamping\nOverhead\n(C−D)', 'Net Attack\nReduction'],
-            [gross, overhead, net],
-            color=['#e67e22', '#2980b9', '#27ae60'],
-            edgecolor='gray', alpha=0.7
-        )
-        axs[1, 0].axhline(y=0, color='gray', linewidth=0.5)
-        axs[1, 0].set_ylabel("Latency Difference (ms)")
-        axs[1, 0].set_title("(c) Mitigation Decomposition", fontweight='bold', fontsize=9)
-        axs[1, 0].grid(True, axis='y', linestyle=':', alpha=0.5)
-
-        for bar, val in zip(bars, [gross, overhead, net]):
-            axs[1, 0].text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                           f'{val:.1f} ms', ha='center', va='bottom', fontsize=7)
-
-    # (d) Time series with mitigation events
-    if 'anomaly_detected' in df.columns:
-        trial1 = df[df['trial'] == 1] if 'trial' in df.columns else df
-        for pn, c in zip(phase_order, colors):
-            mask = trial1['phase'] == pn
-            if mask.any():
-                sub = trial1[mask]
-                axs[1, 1].plot(sub['timestamp'], sub['power_w'], color=c, linewidth=0.7, alpha=0.8)
-
-        if 'mitigation_active' in trial1.columns:
-            mit_mask = trial1['mitigation_active'] == 1
-            if mit_mask.any():
-                axs[1, 1].fill_between(
-                    trial1['timestamp'], trial1['power_w'].min(), trial1['power_w'].max(),
-                    where=mit_mask, alpha=0.15, color='orange', label='Power Clamp Active'
-                )
-
-        axs[1, 1].set_xlabel("Time (s)")
-        axs[1, 1].set_ylabel("Power (W)")
-        axs[1, 1].set_title("(d) Power Trace with Mitigation Events", fontweight='bold', fontsize=9)
-        axs[1, 1].grid(True, linestyle=':', alpha=0.5)
-        axs[1, 1].legend(fontsize=7)
-
-    plt.savefig(os.path.join(out_dir, "fig4_t3_mitigation.png"), dpi=300, bbox_inches='tight')
-    plt.savefig(os.path.join(out_dir, "fig4_t3_mitigation.pdf"), bbox_inches='tight')
-    plt.close()
-    print("  [saved] fig4_t3_mitigation.{png,pdf}")
-
-
-# =============================================================================
-# Figure 5: Mechanism-Isolation Sweep (if available)
-# =============================================================================
-def figure_t1_sweep(df, out_dir):
-    print("\n[Fig 5] T1 Mechanism-Isolation Sweep")
-
-    plt.rcParams.update({'font.size': 9, 'font.family': 'serif'})
-
-    sweep_phases = [p for p in df['phase'].unique() if p.startswith('sweep_window_')]
-    if not sweep_phases:
-        print("  [skip] No sweep phases found")
-        return
-
-    core_phases = [p for p in df['phase'].unique() if not p.startswith('sweep_')]
-    all_phases = list(core_phases) + sorted(sweep_phases, key=lambda x: int(x.split('_')[-1].replace('ms', '')))
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 3.5))
-
-    phase_means = []
-    phase_stds = []
-    phase_labels = []
-    for pn in all_phases:
-        trial_vals = df[df['phase'] == pn].groupby('trial')['victim_total_latency_ms'].mean().values
-        if len(trial_vals) == 0:
-            continue
-        phase_means.append(np.mean(trial_vals))
-        phase_stds.append(np.std(trial_vals, ddof=1) if len(trial_vals) > 1 else 0.0)
-        if pn.startswith('sweep_'):
-            phase_labels.append(pn.split('_')[-1])
-        else:
-            phase_labels.append(pn.replace('victim_', '').replace('_', '\n'))
-
-    x = np.arange(len(phase_means))
-    colors_sweep = ['#27ae60' if i == 0 else '#2980b9' if i == 1 else '#c0392b' if i == 2 else '#8e44ad'
-                    for i in range(len(phase_means))]
-    ax1.bar(x, phase_means, yerr=phase_stds, capsize=3, color=colors_sweep, alpha=0.7, edgecolor='gray')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(phase_labels, fontsize=7, rotation=45, ha='right')
-    ax1.set_ylabel("Mean Victim Latency (ms)")
-    ax1.set_title("(a) Latency vs. Pulse Window", fontweight='bold')
-    ax1.grid(True, axis='y', linestyle=':', alpha=0.5)
-
-    power_means = []
-    power_stds = []
-    for pn in all_phases:
-        trial_vals = df[df['phase'] == pn].groupby('trial')['power_w'].mean().values
-        if len(trial_vals) == 0:
-            continue
-        power_means.append(np.mean(trial_vals))
-        power_stds.append(np.std(trial_vals, ddof=1) if len(trial_vals) > 1 else 0.0)
-
-    ax2.bar(x[:len(power_means)], power_means, yerr=power_stds, capsize=3,
-            color=colors_sweep[:len(power_means)], alpha=0.7, edgecolor='gray')
-    ax2.set_xticks(x[:len(power_means)])
-    ax2.set_xticklabels(phase_labels[:len(power_means)], fontsize=7, rotation=45, ha='right')
-    ax2.set_ylabel("Mean Power (W)")
-    ax2.set_title("(b) Power Draw vs. Pulse Window", fontweight='bold')
-    ax2.grid(True, axis='y', linestyle=':', alpha=0.5)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "fig5_t1_sweep.png"), dpi=300, bbox_inches='tight')
-    plt.savefig(os.path.join(out_dir, "fig5_t1_sweep.pdf"), bbox_inches='tight')
-    plt.close()
-    print("  [saved] fig5_t1_sweep.{png,pdf}")
+# Figure rendering is separated from statistical reports for independent review.
+from publication_figures import (
+    figure_t1_power_characterization, figure_t1_latency_degradation,
+    figure_t2_defense_diagnostics, figure_t3_mitigation, figure_t1_sweep,
+)
 
 
 # =============================================================================
@@ -715,7 +308,7 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         lines.append("TASK 3: MITIGATION EFFECTIVENESS METRICS")
         lines.append("=" * 72)
 
-        phase_order = ['attack_unmitigated', 'attack_mitigated', 'victim_clamped_baseline', 'recovery_baseline']
+        phase_order = ['attack_unmitigated', 'attack_mitigated', 'attack_terminated', 'victim_clamped_baseline', 'recovery_baseline']
         lines.append(f"\n{'Phase':<28}{'Latency(ms)':<18}{'Power(W)':<16}{'Min V(V)':<12}")
         lines.append("-" * 74)
 
@@ -772,6 +365,49 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
             cap_rate = ((sub['sw_power_cap'] == 1) | (sub['hw_slowdown'] == 1)).sum() / len(sub) * 100
             lines.append(f"  {pn} throttle rate: {cap_rate:.1f}%")
 
+    # --- T2 Spectral Characterization (Welch PSD) ---
+    if t1_df is not None:
+        lines.append("\n" + "-" * 72)
+        lines.append("TASK 2c: SPECTRAL CHARACTERIZATION (Welch PSD)")
+        lines.append("-" * 72)
+
+        for pn in t1_df['phase'].unique():
+            sub = t1_df[t1_df['phase'] == pn]
+            p_vals = sub['power_w'].values
+            if len(p_vals) < 32:
+                continue
+            ts = sub['timestamp'].values
+            dt_mean = np.mean(np.diff(ts))
+            fs = 1.0 / dt_mean if dt_mean > 0 else 4.0
+            nyquist = fs / 2.0
+            nperseg = min(len(p_vals), 256)
+            freqs, psd = signal.welch(p_vals, fs=fs, nperseg=nperseg)
+            peak_idx = np.argmax(psd[1:]) + 1
+            peak_freq = freqs[peak_idx]
+            peak_psd_db = 10 * np.log10(psd[peak_idx] + 1e-10)
+            total_power_db = 10 * np.log10(np.sum(psd) + 1e-10)
+            lines.append(f"  {pn:30s}: Fs={fs:.1f}Hz Nyquist={nyquist:.1f}Hz | "
+                         f"peak={peak_freq:.2f}Hz ({peak_psd_db:.1f}dB) total={total_power_db:.1f}dB")
+
+        lines.append(f"\n  Note: Attack pulsing at 10kHz is far above the ~2Hz Nyquist limit.")
+        lines.append(f"  Spectral analysis characterizes the low-frequency power envelope,")
+        lines.append(f"  not the kHz-scale attack modulation pattern.")
+
+    # --- GPU Utilization Metrics (Performance Counters) ---
+    if t1_df is not None and 'gpu_util_pct' in t1_df.columns:
+        lines.append("\n" + "-" * 72)
+        lines.append("TASK 2d: GPU PERFORMANCE COUNTER METRICS")
+        lines.append("-" * 72)
+
+        for pn in t1_df['phase'].unique():
+            sub = t1_df[t1_df['phase'] == pn]
+            gpu_u = sub['gpu_util_pct']
+            mem_u = sub['mem_util_pct']
+            if gpu_u.max() > 0 or mem_u.max() > 0:
+                lines.append(f"  {pn:30s}: GPU={gpu_u.mean():.0f}% Mem={mem_u.mean():.0f}%")
+            else:
+                lines.append(f"  {pn:30s}: GPU=N/A Mem=N/A (counters returned 0)")
+
     lines.append("\n" + "=" * 72)
     lines.append("END OF METRICS REPORT")
     lines.append("=" * 72)
@@ -800,6 +436,7 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
             'victim_compute_only': 'Compute-Only Stress',
             'victim_pulsed_stress': '10 kHz Pulsed Attack',
             'victim_matched_benign': 'Matched Benign Stress',
+            'victim_temp_sync_stress': 'Temp-Sync Pulsed Attack',
         }
 
         rows = []
@@ -829,10 +466,11 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
             print(f"  [saved] table_t1_results.tex")
 
     if t3_df is not None:
-        phase_order = ['attack_unmitigated', 'attack_mitigated', 'victim_clamped_baseline', 'recovery_baseline']
+        phase_order = ['attack_unmitigated', 'attack_mitigated', 'attack_terminated', 'victim_clamped_baseline', 'recovery_baseline']
         phase_labels = {
             'attack_unmitigated': 'Attack (Unmitigated)',
             'attack_mitigated': 'Attack (Mitigated)',
+            'attack_terminated': 'Attack (Terminated)',
             'victim_clamped_baseline': 'Clamped Baseline',
             'recovery_baseline': 'Recovery Baseline'
         }
@@ -867,10 +505,14 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
 def main():
     parser = argparse.ArgumentParser(description="Project GAIA: Post-Experiment Analysis")
     parser.add_argument("results_dir", help="Directory containing experiment CSV files")
-    parser.add_argument("--tdp", type=float, default=80.0, help="GPU TDP in watts (for Figure 1)")
+    parser.add_argument("--tdp", type=float, default=None,
+                        help="Optional verified power reference in watts; no reference by default")
+    parser.add_argument("--out-dir", help="Output folder (default: results_dir/figures)")
+    parser.add_argument("--figures-only", action="store_true",
+                        help="Render figures without regenerating statistical reports or tables")
     args = parser.parse_args()
 
-    out_dir = os.path.join(args.results_dir, "figures")
+    out_dir = args.out_dir or os.path.join(args.results_dir, "figures")
     os.makedirs(out_dir, exist_ok=True)
 
     print("=" * 72)
@@ -895,8 +537,9 @@ def main():
     if t3_df is not None:
         figure_t3_mitigation(t3_df, out_dir)
 
-    generate_metrics_report(t1_df, t3_df, sweep_df, out_dir)
-    generate_latex_tables(t1_df, t3_df, out_dir)
+    if not args.figures_only:
+        generate_metrics_report(t1_df, t3_df, sweep_df, out_dir)
+        generate_latex_tables(t1_df, t3_df, out_dir)
 
     print("\n" + "=" * 72)
     print("ANALYSIS COMPLETE")

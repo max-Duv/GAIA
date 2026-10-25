@@ -122,9 +122,25 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
         p_mode = p_info["mode"]
         p_freq = p_info["freq"]
         p_duty = p_info["duty"]
+        temp_sync = p_info.get("temp_sync", False)
 
         print(f"  [{trial_label}] Phase '{p_name}' (Mode: {p_mode}, Freq: {p_freq} kHz, Duty: {p_duty})...")
         cuda_proc = None
+
+        if temp_sync and p_mode is not None:
+            baseline_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
+            temp_threshold = baseline_temp + 2
+            print(f"    [temp-sync] Baseline temp: {baseline_temp}°C, waiting for >{temp_threshold}°C before launching attack...")
+            sync_start = time.time()
+            while (time.time() - sync_start) < 5.0:
+                assessor.run_victim_workload_iteration()
+                cur_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
+                if cur_temp > temp_threshold:
+                    print(f"    [temp-sync] Temp rose to {cur_temp}°C — launching synchronized attack")
+                    break
+                time.sleep(0.1)
+            else:
+                print(f"    [temp-sync] Timeout — launching attack at current temp")
 
         if p_mode is not None and os.path.exists(cuda_binary):
             cmd = [
@@ -180,6 +196,8 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
                 "victim_launch_delay_ms": round(v_res["launch_delay_ms"], 3),
                 "sm_clock_mhz": sm_clk,
                 "gpu_temp_c": gpu_temp,
+                "gpu_util_pct": hw.get("gpu_util_pct", 0),
+                "mem_util_pct": hw.get("mem_util_pct", 0),
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
                 "throttle_bitmask": hw.get("throttle_bitmask", 0)
@@ -269,6 +287,8 @@ def run_controlled_3phase_experiment(
         {"name": "victim_cache_only", "mode": "cache", "freq": 0.001, "duty": 1.0},
         {"name": "victim_compute_only", "mode": "compute", "freq": 0.001, "duty": 1.0},
         {"name": "victim_pulsed_stress", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5},
+        {"name": "victim_temp_sync_stress", "mode": "oversubscribe", "freq": 0.001, "duty": 1.0,
+         "temp_sync": True},
     ]
 
     if sweep_mechanism:
@@ -320,7 +340,7 @@ def run_controlled_3phase_experiment(
             "trial", "timestamp", "phase", "data_source", "power_w", "voltage_v",
             "current_a", "di_dt_amps_per_sec", "victim_kernel_ms",
             "victim_total_latency_ms", "victim_launch_delay_ms",
-            "sm_clock_mhz", "gpu_temp_c",
+            "sm_clock_mhz", "gpu_temp_c", "gpu_util_pct", "mem_util_pct",
             "sw_power_cap", "hw_slowdown", "throttle_bitmask"
         ]
         with open(output_csv, "w", newline="") as f:

@@ -183,6 +183,19 @@ def _run_single_trial(
                 else:
                     print(f"    [!] Mitigation clamp FAILED")
 
+            if p_info.get("terminate") and is_anomalous and not mitigation_active:
+                print(f"    [!] Anomaly detected (mean power: {mean_power_det:.1f} W > {detector.power_anomaly_threshold_w:.0f} W) — TERMINATING adversarial kernel")
+                if cuda_proc is not None and cuda_proc.poll() is None:
+                    cuda_proc.terminate()
+                    try:
+                        cuda_proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        cuda_proc.kill()
+                    print(f"    [+] Adversarial kernel terminated (PID: {cuda_proc.pid})")
+                    cuda_proc = None
+                mitigation_active = True
+                mitigation_trigger_count += 1
+
             all_records.append({
                 "trial": trial_num,
                 "timestamp": round(t_curr - global_start, 4),
@@ -198,6 +211,8 @@ def _run_single_trial(
                 "mitigation_active": int(mitigation_active),
                 "sm_clock_mhz": hw.get("sm_clock_mhz", 0),
                 "gpu_temp_c": hw.get("gpu_temp_c", 0),
+                "gpu_util_pct": hw.get("gpu_util_pct", 0),
+                "mem_util_pct": hw.get("mem_util_pct", 0),
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
                 "throttle_bitmask": hw.get("throttle_bitmask", 0)
@@ -312,6 +327,7 @@ def run_closed_loop_experiment(
     phases = [
         {"name": "attack_unmitigated",     "run_stress": True,  "mitigate": False},
         {"name": "attack_mitigated",       "run_stress": True,  "mitigate": True},
+        {"name": "attack_terminated",      "run_stress": True,  "mitigate": False, "terminate": True},
         {"name": "victim_clamped_baseline", "run_stress": False, "mitigate": False, "force_clamp": True},
         {"name": "recovery_baseline",      "run_stress": False, "mitigate": False},
     ]
@@ -363,7 +379,7 @@ def run_closed_loop_experiment(
 
 def _print_aggregate_summary(per_trial_summaries, num_trials):
     """Prints aggregate statistics and mitigation decomposition across all trials."""
-    phase_names = ["attack_unmitigated", "attack_mitigated", "victim_clamped_baseline", "recovery_baseline"]
+    phase_names = ["attack_unmitigated", "attack_mitigated", "attack_terminated", "victim_clamped_baseline", "recovery_baseline"]
 
     print("\n=====================================================================")
     print("      PROJECT GAIA: T3 CLOSED-LOOP MITIGATION SUMMARY (v2.0)        ")

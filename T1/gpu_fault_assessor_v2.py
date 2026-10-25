@@ -255,6 +255,14 @@ class GPUFaultAssessorV2:
             pass
 
         try:
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            result["gpu_util_pct"] = util.gpu
+            result["mem_util_pct"] = util.memory
+        except pynvml.NVMLError:
+            result["gpu_util_pct"] = 0
+            result["mem_util_pct"] = 0
+
+        try:
             raw = pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(handle)
             sw_cap = int(bool(raw & 0x0000000000000004))
             hw_slow = int(bool(raw & 0x0000000000000008))
@@ -283,11 +291,13 @@ class GPUFaultAssessorV2:
         def _merge_nvml(res, nvml_data):
             if nvml_data:
                 for k in ("sm_clock_mhz", "gpu_temp_c", "sw_power_cap",
-                           "hw_slowdown", "throttle_bitmask", "throttle_bitmask_raw"):
+                           "hw_slowdown", "throttle_bitmask", "throttle_bitmask_raw",
+                           "gpu_util_pct", "mem_util_pct"):
                     res[k] = nvml_data.get(k, 0)
             else:
                 for k in ("sm_clock_mhz", "gpu_temp_c", "sw_power_cap",
-                           "hw_slowdown", "throttle_bitmask", "throttle_bitmask_raw"):
+                           "hw_slowdown", "throttle_bitmask", "throttle_bitmask_raw",
+                           "gpu_util_pct", "mem_util_pct"):
                     res.setdefault(k, 0)
 
             if res.get("sm_clock_mhz", 0) == 0 and self._devfreq_path:
