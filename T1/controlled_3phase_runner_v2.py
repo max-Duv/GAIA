@@ -123,24 +123,29 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
         p_freq = p_info["freq"]
         p_duty = p_info["duty"]
         temp_sync = p_info.get("temp_sync", False)
+        temp_sync_trigger = "none"
 
         print(f"  [{trial_label}] Phase '{p_name}' (Mode: {p_mode}, Freq: {p_freq} kHz, Duty: {p_duty})...")
         cuda_proc = None
 
         if temp_sync and p_mode is not None:
             baseline_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
-            temp_threshold = baseline_temp + 2
-            print(f"    [temp-sync] Baseline temp: {baseline_temp}°C, waiting for >{temp_threshold}°C before launching attack...")
+            temp_threshold = baseline_temp + 0.5
+            print(f"    [temp-sync] Baseline temp: {baseline_temp}°C, threshold: >{temp_threshold}°C (delta=0.5°C), timeout=15s")
             sync_start = time.time()
-            while (time.time() - sync_start) < 5.0:
+            while (time.time() - sync_start) < 15.0:
                 assessor.run_victim_workload_iteration()
                 cur_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
                 if cur_temp > temp_threshold:
-                    print(f"    [temp-sync] Temp rose to {cur_temp}°C — launching synchronized attack")
+                    elapsed_sync = time.time() - sync_start
+                    print(f"    [temp-sync] Temp rose to {cur_temp}°C after {elapsed_sync:.1f}s — launching synchronized attack")
+                    temp_sync_trigger = "temp_triggered"
                     break
-                time.sleep(0.1)
+                time.sleep(0.05)
             else:
-                print(f"    [temp-sync] Timeout — launching attack at current temp")
+                cur_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
+                print(f"    [temp-sync] Timeout after 15s (temp: {cur_temp}°C) — launching attack")
+                temp_sync_trigger = "timeout_triggered"
 
         if p_mode is not None and os.path.exists(cuda_binary):
             cmd = [
@@ -200,7 +205,8 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor, trial_la
                 "mem_util_pct": hw.get("mem_util_pct", 0),
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
-                "throttle_bitmask": hw.get("throttle_bitmask", 0)
+                "throttle_bitmask": hw.get("throttle_bitmask", 0),
+                "temp_sync_trigger": temp_sync_trigger
             })
 
             prev_current_a = curr_a
@@ -287,19 +293,29 @@ def run_controlled_3phase_experiment(
         {"name": "victim_cache_only", "mode": "cache", "freq": 0.001, "duty": 1.0},
         {"name": "victim_compute_only", "mode": "compute", "freq": 0.001, "duty": 1.0},
         {"name": "victim_pulsed_stress", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5},
-        {"name": "victim_temp_sync_stress", "mode": "oversubscribe", "freq": 0.001, "duty": 1.0,
+        {"name": "victim_temp_sync_stress", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5,
          "temp_sync": True},
     ]
 
     if sweep_mechanism:
-        sweep_windows_ms = [1, 5, 10, 50, 100, 250, 500]
-        for w_ms in sweep_windows_ms:
-            freq_khz = 1.0 / (2.0 * w_ms)
+        # Frequency sweep at fixed 50% duty: tests DVFS interaction
+        # from grid-relevant sub-Hz up through kHz
+        sweep_freq_hz = [0.5, 1, 2, 5, 10, 50, 100, 500, 10000]
+        for f_hz in sweep_freq_hz:
+            freq_khz = f_hz / 1000.0
             phases.append({
-                "name": f"sweep_window_{w_ms}ms",
+                "name": f"sweep_freq_{f_hz}hz",
                 "mode": "oversubscribe",
                 "freq": freq_khz,
                 "duty": 0.5
+            })
+        # Duty-cycle sweep at fixed 10 kHz: tests power vs active fraction
+        for duty_pct in [25, 50, 75]:
+            phases.append({
+                "name": f"sweep_duty_{duty_pct}pct",
+                "mode": "oversubscribe",
+                "freq": 10.0,
+                "duty": duty_pct / 100.0,
             })
 
     # --- Warmup trial (discarded) to stabilize GPU clocks and thermals ---
@@ -341,7 +357,7 @@ def run_controlled_3phase_experiment(
             "current_a", "di_dt_amps_per_sec", "victim_kernel_ms",
             "victim_total_latency_ms", "victim_launch_delay_ms",
             "sm_clock_mhz", "gpu_temp_c", "gpu_util_pct", "mem_util_pct",
-            "sw_power_cap", "hw_slowdown", "throttle_bitmask"
+            "sw_power_cap", "hw_slowdown", "throttle_bitmask", "temp_sync_trigger"
         ]
         with open(output_csv, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)

@@ -192,21 +192,26 @@ across 10 independent trials, each with 15-second phases:
 \item \textbf{Pulsed stress} (10\,kHz, 50\% duty): Full
   cache+compute kernel modulated at 10\,kHz using CUDA
   \texttt{clock64()} busy-wait timing.
-\item \textbf{Temperature-synchronized stress}: Pulsed attack
-  launched only after detecting a $>$2\,$^\circ$C GPU temperature
-  rise (via thermal zone sysfs), demonstrating that user-level
-  thermal side channels can synchronize attack timing to victim
-  computation.
+\item \textbf{Temperature-synchronized stress}: 10\,kHz pulsed
+  attack launched only after detecting a $>$0.5\,$^\circ$C GPU
+  temperature rise (via thermal zone sysfs, 15\,s timeout),
+  demonstrating that user-level thermal side channels can
+  synchronize attack timing to victim computation.  Each trial
+  records whether the trigger was thermal or timeout.
 \end{enumerate}
+
+A mechanism-isolation sweep additionally varies pulsing frequency
+across nine values (0.5, 1, 2, 5, 10, 50, 100, 500, and
+10{,}000\,Hz) at fixed 50\% duty cycle, and separately varies
+duty cycle (25\%, 50\%, 75\%) at fixed 10\,kHz, across 5 trials
+per setting.
 
 In addition to INA3221 power and devfreq clock telemetry, we record
 GPU and memory utilization percentages via NVML
 (\texttt{nvmlDeviceGetUtilizationRates}), providing performance-counter
 data for multi-modal detection analysis.
 
-A mechanism-isolation sweep additionally varies pulsing frequency from
-0.5\,kHz to 500\,Hz across 5 trials per frequency.  Phase order is
-randomized per trial, and a warmup trial is discarded.
+Phase order is randomized per trial, and a warmup trial is discarded.
 
 \subsection{Thrust~2: Detection}
 
@@ -247,7 +252,10 @@ the GPU clock via the Jetson devfreq interface
 \textbf{Strategy~B: Graceful termination.}
 Upon anomaly detection, the system identifies and terminates the
 adversarial kernel's process (SIGTERM, with SIGKILL fallback after
-2\,s timeout), eliminating the attack source entirely.
+2\,s timeout), eliminating the attack source entirely.  Exit
+confirmation, kill method (SIGTERM vs SIGKILL), and elapsed kill
+time are recorded.  Post-kill power and victim latency recovery
+are measured for the remainder of the phase.
 
 Each trial runs five phases in sequence: \emph{attack\_unmitigated}
 (attack with no defense), \emph{attack\_mitigated} (attack with
@@ -263,8 +271,10 @@ To bridge the gap between research instrumentation and
 industry-standard monitoring, we implement a lightweight HTTP server
 that exports all GPU telemetry metrics (power, voltage, clock,
 temperature, utilization, anomaly flags) in Prometheus exposition
-format on port~9400, compatible with standard Prometheus/Grafana
-monitoring stacks deployed in production data centers.
+format on port~9400, compatible with standard Prometheus/Grafana monitoring stacks
+deployed in production data centers.  A pre-built Grafana dashboard
+(\texttt{grafana\_dashboard.json}) provides seven panels covering
+power, temperature, clock, voltage, utilization, and anomaly status.
 
 % ===========================================================================
 \section{Thrust~1: Attack Characterization Results}
@@ -334,14 +344,21 @@ Temperature rises from 44.3\,$^\circ$C (alone) to 47.7\,$^\circ$C
 
 \subsection{Mechanism Isolation}
 
-The five-frequency sweep (1\,ms to 500\,ms pulse windows, 5 trials
-each) shows that power draw increases monotonically with pulse
-frequency, from 70.8\,W at 500\,ms windows to 78.6\,W at 1\,ms
-windows.  The frequency dependence is shallow: even the slowest
-pulsing pattern ($f = 1$\,Hz) elevates power $1.56\times$ above
-baseline, indicating that the power elevation is primarily from the
-aggregate compute load rather than resonance effects at specific
+The frequency sweep (0.5\,Hz to 10\,kHz at 50\% duty, 5 trials
+per setting) reveals a DVFS interaction effect: at sub-Hz pulsing,
+the GPU's dynamic voltage--frequency scaling has time to downclock
+during idle phases, reducing time-averaged power.  At higher
+frequencies ($>$50\,Hz), the idle phase is too short for DVFS to
+react, and power converges toward the DC value.  This shows that
+the power elevation is primarily from aggregate compute load
+modulated by DVFS response time, not resonance at specific
 frequencies.
+
+The duty-cycle sweep (25\%, 50\%, 75\% at fixed 10\,kHz) directly
+measures the relationship between active fraction and power draw,
+confirming that power scales approximately linearly with duty cycle.
+This validates that the attacker can control the magnitude of
+power injection by tuning the active/idle ratio.
 
 % ===========================================================================
 \section{Thrust~2: Detection Results}

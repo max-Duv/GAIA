@@ -239,31 +239,66 @@ def figure_detection(df, out_dir):
 
 @plt.rc_context(STYLE)
 def figure_t1_sweep(df, out_dir):
-    phases = sorted([p for p in df.phase.unique() if p.startswith('sweep_window_')],
-                    key=lambda p: float(p.split('_')[-1][:-2]))
-    if not phases:
+    # Support both old window-based and new frequency-based sweep naming
+    freq_phases = sorted([p for p in df.phase.unique() if p.startswith('sweep_freq_')],
+                         key=lambda p: float(p.replace('sweep_freq_', '').replace('hz', '')))
+    window_phases = sorted([p for p in df.phase.unique() if p.startswith('sweep_window_')],
+                           key=lambda p: float(p.split('_')[-1][:-2]))
+    duty_phases = sorted([p for p in df.phase.unique() if p.startswith('sweep_duty_')],
+                         key=lambda p: int(p.replace('sweep_duty_', '').replace('pct', '')))
+
+    if freq_phases:
+        x = np.array([float(p.replace('sweep_freq_', '').replace('hz', '')) for p in freq_phases])
+        sweep_phases = freq_phases
+        x_label = 'Pulsing frequency (Hz)'
+    elif window_phases:
+        x = np.array([float(p.split('_')[-1][:-2]) for p in window_phases])
+        sweep_phases = window_phases
+        x_label = 'Configured pulse window (ms)'
+    else:
         return
-    x = np.array([float(p.split('_')[-1][:-2]) for p in phases])
-    fig, axes = plt.subplots(1, 2, figsize=(7.16, 3.5), layout='constrained')
-    for ax, metric, label in zip(axes, ['power_w', kernel_column(df)],
+
+    n_cols = 3 if duty_phases else 2
+    fig, axes = plt.subplots(1, n_cols, figsize=(7.16 if n_cols == 2 else 10.5, 3.5),
+                             layout='constrained')
+    for ax, metric, label in zip(axes[:2], ['power_w', kernel_column(df)],
                                  ['Recorded power (W)', 'Victim kernel time (ms)']):
         means, cis = [], []
-        for window, phase in zip(x, phases):
+        for val, phase in zip(x, sweep_phases):
             values = df[df.phase == phase].groupby('trial')[metric].mean().values
             mean, ci = mean_ci(values)
             means.append(mean)
             cis.append(ci)
-            ax.scatter(np.repeat(window, len(values)), values, s=14, color='#0072B2', alpha=.4)
+            ax.scatter(np.repeat(val, len(values)), values, s=14, color='#0072B2', alpha=.4)
         ax.errorbar(x, means, yerr=cis, fmt='o-', color='#0072B2', capsize=3, ms=4)
         ax.set_xscale('log')
         ax.set_xticks(x, [f'{v:g}' for v in x])
-        ax.set_xlabel('Configured pulse window (ms)')
+        ax.tick_params(axis='x', rotation=45)
+        ax.set_xlabel(x_label)
         ax.set_ylabel(label)
-    axes[0].set_title('(a) Power response')
-    axes[1].set_title('(b) Kernel timing')
-    fig.suptitle('Pulse-window sensitivity', fontsize=12)
+    axes[0].set_title('(a) Power vs frequency')
+    axes[1].set_title('(b) Latency vs frequency')
+
+    if duty_phases and n_cols > 2:
+        ax = axes[2]
+        duty_x = np.array([int(p.replace('sweep_duty_', '').replace('pct', '')) for p in duty_phases])
+        for metric, color, label in [('power_w', '#D55E00', 'Power (W)'),
+                                     (kernel_column(df), '#0072B2', 'Latency (ms)')]:
+            means, cis = [], []
+            for d, phase in zip(duty_x, duty_phases):
+                values = df[df.phase == phase].groupby('trial')[metric].mean().values
+                mean, ci = mean_ci(values)
+                means.append(mean)
+                cis.append(ci)
+            ax.errorbar(duty_x, means, yerr=cis, fmt='o-', color=color, capsize=3, ms=4, label=label)
+        ax.set_xlabel('Duty cycle (%)')
+        ax.set_xticks(duty_x)
+        ax.legend(fontsize=7)
+        ax.set_title('(c) Duty-cycle effect')
+
+    fig.suptitle('Attack parameter sensitivity', fontsize=12)
     save(fig, out_dir, 'fig5_t1_sweep',
          'Points summarize equally weighted trial means; error bars are 95% Student-t '
-         'confidence intervals. Faint dots are individual trials. The logarithmic x-axis '
-         'uses configured window labels, not independently measured pulse timing. '
+         'confidence intervals. Faint dots are individual trials. Logarithmic x-axis '
+         'for frequency sweep. Duty-cycle sweep at fixed 10 kHz. '
          'Connecting lines guide the eye and do not imply measurements between settings.')

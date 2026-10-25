@@ -83,10 +83,11 @@ cp -f controlled_3phase_experiment_v2_summary.csv \
 
 echo ""
 echo "====================================================================="
-echo "  THRUST 1: Mechanism-Isolation Sweep (${SWEEP_TRIALS} trials)"
+echo "  THRUST 1: Frequency & Duty-Cycle Sweep (${SWEEP_TRIALS} trials)"
+echo "  Frequencies: 0.5-10000 Hz at 50% duty + 25/50/75% duty at 10kHz"
 echo "====================================================================="
 
-echo "[T1] Running mechanism-isolation sweep..."
+echo "[T1] Running frequency and duty-cycle sweep..."
 python3 controlled_3phase_runner_v2.py \
     --duration "$DURATION" \
     --trials "$SWEEP_TRIALS" \

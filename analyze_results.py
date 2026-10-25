@@ -408,6 +408,58 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
             else:
                 lines.append(f"  {pn:30s}: GPU=N/A Mem=N/A (counters returned 0)")
 
+    # --- Temperature-Sync Trigger Analysis ---
+    if t1_df is not None and 'temp_sync_trigger' in t1_df.columns:
+        lines.append("\n" + "-" * 72)
+        lines.append("TASK 1b: TEMPERATURE-SYNC TRIGGER ANALYSIS")
+        lines.append("-" * 72)
+
+        ts_data = t1_df[t1_df['phase'] == 'victim_temp_sync_stress']
+        if not ts_data.empty:
+            for trial in sorted(ts_data['trial'].unique()):
+                sub = ts_data[ts_data['trial'] == trial]
+                triggers = sub['temp_sync_trigger'].unique()
+                trigger_val = [t for t in triggers if t != 'none']
+                trigger_str = trigger_val[0] if trigger_val else 'none'
+                lines.append(f"  Trial {trial}: trigger={trigger_str}")
+
+            n_temp = len(ts_data[ts_data['temp_sync_trigger'] == 'temp_triggered']['trial'].unique())
+            n_timeout = len(ts_data[ts_data['temp_sync_trigger'] == 'timeout_triggered']['trial'].unique())
+            total_trials = len(ts_data['trial'].unique())
+            lines.append(f"\n  Temperature-triggered: {n_temp}/{total_trials} trials")
+            lines.append(f"  Timeout-triggered:     {n_timeout}/{total_trials} trials")
+
+    # --- Termination Recovery Metrics ---
+    if t3_df is not None and 'terminated' in t3_df.columns:
+        lines.append("\n" + "-" * 72)
+        lines.append("TASK 3b: TERMINATION RECOVERY METRICS")
+        lines.append("-" * 72)
+
+        term_data = t3_df[t3_df['phase'] == 'attack_terminated']
+        if not term_data.empty:
+            for trial in sorted(term_data['trial'].unique()):
+                sub = term_data[term_data['trial'] == trial]
+                pre = sub[sub['terminated'] == 0]
+                post = sub[sub['terminated'] == 1]
+                if not pre.empty and not post.empty:
+                    pre_pow = pre['power_w'].mean()
+                    post_pow = post['power_w'].mean()
+                    pre_lat = pre['victim_total_latency_ms'].mean()
+                    post_lat = post['victim_total_latency_ms'].mean()
+                    lines.append(f"  Trial {trial}: power {pre_pow:.1f}W → {post_pow:.1f}W "
+                                 f"(Δ{pre_pow - post_pow:.1f}W), "
+                                 f"latency {pre_lat:.2f}ms → {post_lat:.2f}ms")
+
+            all_pre = term_data[term_data['terminated'] == 0]
+            all_post = term_data[term_data['terminated'] == 1]
+            if not all_pre.empty and not all_post.empty:
+                lines.append(f"\n  Aggregate pre-kill:  power={all_pre['power_w'].mean():.1f}W, "
+                             f"latency={all_pre['victim_total_latency_ms'].mean():.2f}ms")
+                lines.append(f"  Aggregate post-kill: power={all_post['power_w'].mean():.1f}W, "
+                             f"latency={all_post['victim_total_latency_ms'].mean():.2f}ms")
+                lines.append(f"  Power recovery:  {all_pre['power_w'].mean() - all_post['power_w'].mean():.1f}W")
+                lines.append(f"  Latency change:  {all_pre['victim_total_latency_ms'].mean() - all_post['victim_total_latency_ms'].mean():.2f}ms")
+
     lines.append("\n" + "=" * 72)
     lines.append("END OF METRICS REPORT")
     lines.append("=" * 72)

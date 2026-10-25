@@ -134,6 +134,7 @@ def _run_single_trial(
         cuda_proc = None
         mitigation_active = False
         mitigation_trigger_count = 0
+        termination_time = None
 
         if p_info.get("force_clamp"):
             print(f"    [+] Applying clamped {mitigation_label}")
@@ -185,16 +186,28 @@ def _run_single_trial(
 
             if p_info.get("terminate") and is_anomalous and not mitigation_active:
                 print(f"    [!] Anomaly detected (mean power: {mean_power_det:.1f} W > {detector.power_anomaly_threshold_w:.0f} W) — TERMINATING adversarial kernel")
+                term_start = time.time()
+                term_exit_code = None
+                term_method = "none"
                 if cuda_proc is not None and cuda_proc.poll() is None:
                     cuda_proc.terminate()
+                    term_method = "SIGTERM"
                     try:
                         cuda_proc.wait(timeout=2)
+                        term_exit_code = cuda_proc.returncode
                     except subprocess.TimeoutExpired:
                         cuda_proc.kill()
-                    print(f"    [+] Adversarial kernel terminated (PID: {cuda_proc.pid})")
+                        cuda_proc.wait(timeout=1)
+                        term_exit_code = cuda_proc.returncode
+                        term_method = "SIGKILL"
+                    term_elapsed = time.time() - term_start
+                    print(f"    [+] Adversarial kernel terminated (PID: {cuda_proc.pid}, "
+                          f"method: {term_method}, exit: {term_exit_code}, "
+                          f"kill_time: {term_elapsed:.3f}s)")
                     cuda_proc = None
                 mitigation_active = True
                 mitigation_trigger_count += 1
+                termination_time = t_curr - global_start
 
             all_records.append({
                 "trial": trial_num,
@@ -215,7 +228,8 @@ def _run_single_trial(
                 "mem_util_pct": hw.get("mem_util_pct", 0),
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
-                "throttle_bitmask": hw.get("throttle_bitmask", 0)
+                "throttle_bitmask": hw.get("throttle_bitmask", 0),
+                "terminated": int(termination_time is not None)
             })
 
             prev_current_a = curr_a
@@ -244,8 +258,25 @@ def _run_single_trial(
             "mean_gpu_compute_ms": mean_comp,
             "mean_power_w": mean_pow,
             "min_voltage_v": min_v,
-            "mitigation_triggers": mitigation_trigger_count
+            "mitigation_triggers": mitigation_trigger_count,
         }
+
+        if p_info.get("terminate") and termination_time is not None:
+            post_kill = [r for r in phase_records if r["terminated"] == 1]
+            pre_kill = [r for r in phase_records if r["terminated"] == 0]
+            if post_kill:
+                post_pow = float(np.mean([r["power_w"] for r in post_kill]))
+                post_lat = float(np.mean([r["victim_total_latency_ms"] for r in post_kill]))
+                pre_pow = float(np.mean([r["power_w"] for r in pre_kill])) if pre_kill else mean_pow
+                pre_lat = float(np.mean([r["victim_total_latency_ms"] for r in pre_kill])) if pre_kill else mean_tot
+                summary_results[p_name]["pre_kill_power_w"] = pre_pow
+                summary_results[p_name]["post_kill_power_w"] = post_pow
+                summary_results[p_name]["pre_kill_latency_ms"] = pre_lat
+                summary_results[p_name]["post_kill_latency_ms"] = post_lat
+                summary_results[p_name]["power_recovery_w"] = pre_pow - post_pow
+                summary_results[p_name]["latency_recovery_ms"] = pre_lat - post_lat
+                print(f"      - Pre-kill power:  {pre_pow:.2f} W → Post-kill: {post_pow:.2f} W (Δ{pre_pow - post_pow:.2f} W)")
+                print(f"      - Pre-kill latency: {pre_lat:.2f} ms → Post-kill: {post_lat:.2f} ms")
 
         print(f"    Phase '{p_name}' Completed:")
         print(f"      - Total Latency  : {mean_tot:.2f} ms (Compute: {mean_comp:.2f} ms)")
