@@ -17,6 +17,7 @@ _EXE = ".exe" if sys.platform == "win32" else ""
 
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2, CONDITION_LABELS, collect_platform_info
 from gpu_defense_filters_v2 import PlatformAgnosticAnomalyDetector
+from realistic_victims import TrainingVictim, InferenceVictim
 
 
 def _find_jetson_devfreq():
@@ -110,6 +111,7 @@ def _run_single_trial(
     apply_mitigation,
     restore_normal,
     mitigation_label,
+    victim=None,
 ):
     """Runs one complete pass through all phases. Returns (all_records, summary_results).
     apply_mitigation() and restore_normal() are callbacks for the platform-specific
@@ -166,7 +168,7 @@ def _run_single_trial(
         phase_start = time.time()
 
         while (time.time() - phase_start) < duration_per_phase:
-            v_res = assessor.run_victim_workload_iteration()
+            v_res = victim.run_iteration() if victim else assessor.run_victim_workload_iteration()
             latencies_tot.append(v_res["total_latency_ms"])
             latencies_compute.append(v_res["gpu_compute_ms"])
 
@@ -319,7 +321,8 @@ def run_closed_loop_experiment(
     detection_threshold_w=60.0,
     output_csv=None,
     gpu_idx=0,
-    num_trials=5
+    num_trials=5,
+    victim_type="synthetic",
 ):
     if cuda_binary is None:
         cuda_binary = os.path.join(PARENT_DIR, "T1", "gpu_power_poc_v3" + _EXE)
@@ -338,6 +341,16 @@ def run_closed_loop_experiment(
     print("=====================================================================")
 
     assessor = GPUFaultAssessorV2(target_gpu_index=gpu_idx)
+
+    victim = None
+    if victim_type == "training":
+        victim = TrainingVictim(gpu_idx=gpu_idx)
+        print(f"[+] Victim workload: CNN Training")
+    elif victim_type == "inference":
+        victim = InferenceVictim(gpu_idx=gpu_idx)
+        print(f"[+] Victim workload: CNN Inference")
+    else:
+        print(f"[+] Victim workload: Synthetic (assessor default)")
 
     devfreq_path = _find_jetson_devfreq()
     if devfreq_path:
@@ -389,6 +402,7 @@ def run_closed_loop_experiment(
     output_dir = os.path.dirname(output_csv) or "."
     platform_info = collect_platform_info()
     platform_info["experiment"] = "T3_closed_loop"
+    platform_info["victim_type"] = victim_type
     platform_info["num_trials"] = num_trials
     platform_info["duration_per_phase"] = duration_per_phase
     platform_info["detection_threshold_w"] = detection_threshold_w
@@ -419,6 +433,7 @@ def run_closed_loop_experiment(
                 apply_mitigation=apply_mitigation,
                 restore_normal=restore_normal,
                 mitigation_label=mitigation_label,
+                victim=victim,
             )
             all_trial_records.extend(records)
             per_trial_summaries.append(summary)
@@ -533,6 +548,9 @@ if __name__ == "__main__":
     parser.add_argument("--out", type=str, default=None, help="Output CSV path")
     parser.add_argument("--gpu", type=int, default=0, help="GPU index")
     parser.add_argument("--trials", type=int, default=5, help="Number of repeated trials (default: 5)")
+    parser.add_argument("--victim-type", type=str, default="synthetic",
+                        choices=["synthetic", "training", "inference"],
+                        help="Victim workload type (default: synthetic)")
     args = parser.parse_args()
 
     run_closed_loop_experiment(
@@ -542,5 +560,6 @@ if __name__ == "__main__":
         detection_threshold_w=args.det_threshold,
         output_csv=args.out,
         gpu_idx=args.gpu,
-        num_trials=args.trials
+        num_trials=args.trials,
+        victim_type=args.victim_type,
     )

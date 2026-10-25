@@ -177,9 +177,37 @@ echo "[T3] Running closed-loop mitigation experiment..."
 python3 T3/closed_loop_mitigator_v2.py \
     --duration "$DURATION" \
     --trials 5 \
+    --victim-type synthetic \
     --out "$RESULTS_DIR/t3_closed_loop_mitigation.csv"
 
-echo "[T3] Complete."
+echo "[T3] Synthetic victim complete."
+
+echo ""
+echo "---------------------------------------------------------------------"
+echo "  THRUST 3: Closed-Loop Mitigation — CNN Training Victim (5 trials)"
+echo "---------------------------------------------------------------------"
+
+python3 T3/closed_loop_mitigator_v2.py \
+    --duration "$DURATION" \
+    --trials 5 \
+    --victim-type training \
+    --out "$RESULTS_DIR/t3_training_mitigation.csv"
+
+echo "[T3] Training victim complete."
+
+echo ""
+echo "---------------------------------------------------------------------"
+echo "  THRUST 3: Closed-Loop Mitigation — CNN Inference Victim (5 trials)"
+echo "---------------------------------------------------------------------"
+
+python3 T3/closed_loop_mitigator_v2.py \
+    --duration "$DURATION" \
+    --trials 5 \
+    --victim-type inference \
+    --out "$RESULTS_DIR/t3_inference_mitigation.csv"
+
+echo "[T3] Inference victim complete."
+echo "[T3] All T3 experiments complete."
 
 # =============================================================================
 # THRUST 3b: Prometheus Telemetry Exporter (smoke test)

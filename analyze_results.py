@@ -537,9 +537,13 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
             'victim_sustained_stress': 'Sustained Stress (DC)',
             'victim_cache_only': 'Cache-Only Stress',
             'victim_compute_only': 'Compute-Only Stress',
-            'victim_pulsed_stress': '10 kHz Pulsed Attack',
+            'victim_pulsed_stress': '10\\,kHz Pulsed Attack',
             'victim_matched_benign': 'Matched Benign Stress',
             'victim_temp_sync_stress': 'Temp-Sync Pulsed Attack',
+            'victim_occupancy_stress': 'Occupancy Stress',
+            'victim_legit_highpower': 'Legitimate High-Power',
+            'temp_sync_control_novictim': 'Temp-Sync Control (No Victim)',
+            'temp_sync_randomized_delay': 'Temp-Sync Randomized Delay',
         }
 
         rows = []
@@ -603,6 +607,265 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
 
 
 # =============================================================================
+# Detector Breakdown: FPR by benign class, recall by attack type
+# =============================================================================
+def generate_detector_breakdown(t1_df, out_dir):
+    print("\n[Detector] Generating per-condition classifier breakdown...")
+
+    window_size = min(len(t1_df) // 10, 50)
+    if window_size < 5:
+        window_size = 5
+
+    features, labels, trial_ids, phase_ids = [], [], [], []
+    for trial in sorted(t1_df['trial'].unique()):
+        for phase in t1_df['phase'].unique():
+            seg = t1_df[(t1_df['trial'] == trial) & (t1_df['phase'] == phase)]
+            if len(seg) < window_size:
+                continue
+            if 'is_attack' in seg.columns:
+                is_attack = int(seg['is_attack'].iloc[0])
+            else:
+                lbl = CONDITION_LABELS.get(phase, {})
+                is_attack = int(lbl.get("is_attack", False))
+            for i in range(0, len(seg) - window_size + 1, window_size):
+                sub = seg.iloc[i:i+window_size]
+                features.append([
+                    sub['power_w'].mean(),
+                    sub['power_w'].std(),
+                    sub['voltage_v'].min(),
+                    sub['voltage_v'].max() - sub['voltage_v'].min()
+                ])
+                labels.append(is_attack)
+                trial_ids.append(int(trial))
+                phase_ids.append(phase)
+
+    features = np.array(features)
+    labels = np.array(labels)
+    trial_ids = np.array(trial_ids)
+    phase_ids = np.array(phase_ids)
+
+    if len(features) < 5 or len(np.unique(labels)) < 2:
+        print("  [skip] Insufficient data for detector breakdown")
+        return
+
+    unique_trials = sorted(set(trial_ids))
+    y_true_all, y_pred_all, phase_all = [], [], []
+    for held_out in unique_trials:
+        train_mask = trial_ids != held_out
+        test_mask = trial_ids == held_out
+        if labels[test_mask].size == 0 or labels[train_mask].size == 0:
+            continue
+        if len(np.unique(labels[train_mask])) < 2:
+            continue
+        s = StandardScaler()
+        X_train = s.fit_transform(features[train_mask])
+        X_test = s.transform(features[test_mask])
+        clf = LogisticRegression(max_iter=1000)
+        clf.fit(X_train, labels[train_mask])
+        preds = clf.predict(X_test)
+        y_true_all.extend(labels[test_mask].tolist())
+        y_pred_all.extend(preds.tolist())
+        phase_all.extend(phase_ids[test_mask].tolist())
+
+    if not y_true_all:
+        print("  [skip] No predictions generated")
+        return
+
+    y_true_all = np.array(y_true_all)
+    y_pred_all = np.array(y_pred_all)
+    phase_all = np.array(phase_all)
+
+    lines = ["-" * 72,
+             "DETECTOR BREAKDOWN: Per-Condition Classifier Performance",
+             "-" * 72]
+
+    benign_phases = [p for p in np.unique(phase_all)
+                     if not CONDITION_LABELS.get(p, {}).get("is_attack", False)]
+    attack_phases = [p for p in np.unique(phase_all)
+                     if CONDITION_LABELS.get(p, {}).get("is_attack", False)]
+
+    phase_labels = {
+        'victim_alone': 'Baseline (alone)',
+        'victim_legit_highpower': 'Legit High-Power ($4096^2$)',
+        'temp_sync_control_novictim': 'Temp-Sync Control (no victim)',
+        'victim_sustained_stress': 'Sustained Stress',
+        'victim_cache_only': 'Cache Eviction',
+        'victim_compute_only': 'Compute Saturation',
+        'victim_pulsed_stress': 'Pulsed (10 kHz)',
+        'victim_temp_sync_stress': 'Temp-Sync Attack',
+        'victim_occupancy_stress': 'Occupancy Stress',
+        'temp_sync_randomized_delay': 'Temp-Sync Randomized',
+    }
+
+    # --- Benign conditions: FPR ---
+    lines.append("\nBenign Conditions (false-positive rate):")
+    lines.append(f"  {'Condition':<36s} {'Windows':>7s} {'FP':>4s} {'TN':>4s} {'FPR':>7s}")
+    lines.append("  " + "-" * 60)
+    tex_benign_rows = []
+    for phase in benign_phases:
+        mask = phase_all == phase
+        pred = y_pred_all[mask]
+        fp = int((pred == 1).sum())
+        tn = int((pred == 0).sum())
+        total = fp + tn
+        fpr = fp / max(total, 1)
+        name = phase_labels.get(phase, phase)
+        lines.append(f"  {name:<36s} {total:>7d} {fp:>4d} {tn:>4d} {fpr:>7.1%}")
+        tex_benign_rows.append(
+            f"{name} & {total} & {fp} & {tn} & {fpr*100:.1f}\\% \\\\"
+        )
+
+    # --- Attack conditions: recall ---
+    lines.append("\nAttack Conditions (recall / miss rate):")
+    lines.append(f"  {'Condition':<36s} {'Windows':>7s} {'TP':>4s} {'FN':>4s} {'Recall':>7s}")
+    lines.append("  " + "-" * 60)
+    tex_attack_rows = []
+    for phase in attack_phases:
+        mask = phase_all == phase
+        pred = y_pred_all[mask]
+        tp = int((pred == 1).sum())
+        fn = int((pred == 0).sum())
+        total = tp + fn
+        recall = tp / max(total, 1)
+        name = phase_labels.get(phase, phase)
+        lines.append(f"  {name:<36s} {total:>7d} {tp:>4d} {fn:>4d} {recall:>7.1%}")
+        tex_attack_rows.append(
+            f"{name} & {total} & {tp} & {fn} & {recall*100:.1f}\\% \\\\"
+        )
+
+    # --- Overall confusion ---
+    tp_all = int(((y_true_all == 1) & (y_pred_all == 1)).sum())
+    fn_all = int(((y_true_all == 1) & (y_pred_all == 0)).sum())
+    fp_all = int(((y_true_all == 0) & (y_pred_all == 1)).sum())
+    tn_all = int(((y_true_all == 0) & (y_pred_all == 0)).sum())
+    lines.append(f"\nOverall Confusion Matrix:")
+    lines.append(f"  TP={tp_all}  FP={fp_all}")
+    lines.append(f"  FN={fn_all}  TN={tn_all}")
+    acc = (tp_all + tn_all) / max(tp_all + fn_all + fp_all + tn_all, 1)
+    prec = tp_all / max(tp_all + fp_all, 1)
+    rec = tp_all / max(tp_all + fn_all, 1)
+    f1 = 2 * prec * rec / max(prec + rec, 1e-10)
+    fpr_overall = fp_all / max(fp_all + tn_all, 1)
+    lines.append(f"  Accuracy={acc*100:.1f}%  Precision={prec*100:.1f}%  Recall={rec*100:.1f}%  F1={f1*100:.1f}%")
+    lines.append(f"  Overall FPR={fpr_overall*100:.1f}%")
+
+    summary = "\n".join(lines)
+    txt_path = os.path.join(out_dir, "detector_breakdown.txt")
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write(summary)
+    print(f"  [saved] detector_breakdown.txt")
+    print(summary)
+
+    # --- LaTeX table ---
+    tex = "\\begin{tabular}{lcccc}\n\\toprule\n"
+    tex += "\\multicolumn{5}{l}{\\textbf{Benign Conditions (FPR)}} \\\\\n"
+    tex += "Condition & Windows & FP & TN & FPR \\\\\n\\midrule\n"
+    tex += "\n".join(tex_benign_rows) + "\n"
+    tex += "\\midrule\n"
+    tex += "\\multicolumn{5}{l}{\\textbf{Attack Conditions (Recall)}} \\\\\n"
+    tex += "Condition & Windows & TP & FN & Recall \\\\\n\\midrule\n"
+    tex += "\n".join(tex_attack_rows) + "\n"
+    tex += "\\bottomrule\n\\end{tabular}\n"
+
+    tex_path = os.path.join(out_dir, "table_detector_breakdown.tex")
+    with open(tex_path, 'w', encoding='utf-8') as f:
+        f.write(tex)
+    print(f"  [saved] table_detector_breakdown.tex")
+
+
+# =============================================================================
+# Workload Comparison Table (synthetic vs training vs inference)
+# =============================================================================
+def generate_workload_comparison(t1_df, train_df, infer_df, out_dir):
+    print("\n[Workload] Generating cross-workload comparison table...")
+
+    workloads = []
+    datasets = [
+        ("Matrix Multiply ($2048^2$)", "synthetic", t1_df),
+        ("CNN Training", "training", train_df),
+        ("CNN Inference", "inference", infer_df),
+    ]
+
+    for label, wtype, df in datasets:
+        if df is None:
+            continue
+        n_trials = df['trial'].nunique()
+        row = {"Workload": label, "Trials": n_trials}
+        for phase, col_label in [
+            ("victim_alone", "alone"),
+            ("victim_sustained_stress", "sustained"),
+            ("victim_cache_only", "cache"),
+            ("victim_pulsed_stress", "pulsed"),
+        ]:
+            sub = df[df['phase'] == phase]
+            if sub.empty:
+                row[f"{col_label}_mean"] = np.nan
+                row[f"{col_label}_std"] = np.nan
+                continue
+            trial_means = sub.groupby('trial')['victim_total_latency_ms'].mean()
+            row[f"{col_label}_mean"] = trial_means.mean()
+            row[f"{col_label}_std"] = trial_means.std()
+
+        if not np.isnan(row.get("alone_mean", np.nan)) and row["alone_mean"] > 0:
+            for atk in ["sustained", "cache", "pulsed"]:
+                m = row.get(f"{atk}_mean", np.nan)
+                if not np.isnan(m):
+                    row[f"{atk}_degrad"] = (m - row["alone_mean"]) / row["alone_mean"] * 100
+        workloads.append(row)
+
+    if not workloads:
+        print("  [skip] No workload data available")
+        return
+
+    # --- Generate LaTeX table ---
+    tex_rows = []
+    for w in workloads:
+        alone_str = f"${w['alone_mean']:.2f} \\pm {w['alone_std']:.2f}$" if not np.isnan(w.get('alone_mean', np.nan)) else "---"
+        sust_str = f"${w['sustained_mean']:.2f} \\pm {w['sustained_std']:.2f}$" if not np.isnan(w.get('sustained_mean', np.nan)) else "---"
+        cache_str = f"${w['cache_mean']:.2f} \\pm {w['cache_std']:.2f}$" if not np.isnan(w.get('cache_mean', np.nan)) else "---"
+        degrad = w.get('sustained_degrad', np.nan)
+        degrad_str = f"+{degrad:.0f}\\%" if not np.isnan(degrad) else "---"
+        tex_rows.append(
+            f"{w['Workload']} & {w['Trials']} & {alone_str} & {sust_str} & {cache_str} & {degrad_str} \\\\"
+        )
+
+    tex = "\\begin{tabular}{lccccc}\n\\toprule\n"
+    tex += "Workload & Trials & Alone (ms) & Sustained (ms) & Cache (ms) & Degrad. \\\\\n"
+    tex += "\\midrule\n"
+    tex += "\n".join(tex_rows) + "\n"
+    tex += "\\bottomrule\n\\end{tabular}\n"
+
+    path = os.path.join(out_dir, "table_workload_comparison.tex")
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(tex)
+    print(f"  [saved] table_workload_comparison.tex")
+
+    # --- Generate text summary ---
+    lines = ["\n" + "-" * 72,
+             "WORKLOAD-DEPENDENT ATTACK IMPACT",
+             "-" * 72]
+    for w in workloads:
+        lines.append(f"\n  {w['Workload']} ({w['Trials']} trials):")
+        for phase_key, phase_label in [("alone", "Alone"), ("sustained", "Sustained"),
+                                        ("cache", "Cache"), ("pulsed", "Pulsed")]:
+            m = w.get(f"{phase_key}_mean", np.nan)
+            s = w.get(f"{phase_key}_std", np.nan)
+            if not np.isnan(m):
+                lines.append(f"    {phase_label:12s}: {m:.2f} ± {s:.2f} ms")
+        for atk in ["sustained", "cache", "pulsed"]:
+            d = w.get(f"{atk}_degrad", np.nan)
+            if not np.isnan(d):
+                lines.append(f"    {atk.capitalize()} degradation: +{d:.1f}%")
+
+    summary = "\n".join(lines)
+    summary_path = os.path.join(out_dir, "workload_comparison.txt")
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        f.write(summary)
+    print(f"  [saved] workload_comparison.txt")
+    print(summary)
+
+
+# =============================================================================
 # Main
 # =============================================================================
 def main():
@@ -628,6 +891,8 @@ def main():
     t1_df = load_csv(args.results_dir, "t1_3phase_experiment.csv")
     sweep_df = load_csv(args.results_dir, "t1_sweep_experiment.csv")
     t3_df = load_csv(args.results_dir, "t3_closed_loop_mitigation.csv")
+    train_df = load_csv(args.results_dir, "t1_training_victim.csv")
+    infer_df = load_csv(args.results_dir, "t1_inference_victim.csv")
 
     if t1_df is not None:
         figure_t1_power_characterization(t1_df, out_dir, tdp_w=args.tdp)
@@ -643,6 +908,9 @@ def main():
     if not args.figures_only:
         generate_metrics_report(t1_df, t3_df, sweep_df, out_dir)
         generate_latex_tables(t1_df, t3_df, out_dir)
+        generate_workload_comparison(t1_df, train_df, infer_df, out_dir)
+        if t1_df is not None:
+            generate_detector_breakdown(t1_df, out_dir)
 
     print("\n" + "=" * 72)
     print("ANALYSIS COMPLETE")
