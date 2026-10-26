@@ -22,6 +22,8 @@ CONDITION_LABELS = {
     "victim_legit_highpower":    {"is_attack": False, "category": "benign_highpower"},
     "temp_sync_control_novictim": {"is_attack": False, "category": "control_tempsync"},
     "temp_sync_randomized_delay": {"is_attack": True,  "category": "control_tempsync_random"},
+    "thermal_spike_hold":        {"is_attack": True,  "category": "attack_thermal_hold"},
+    "thermal_spike_release":     {"is_attack": True,  "category": "attack_thermal_release"},
     "attack_unmitigated":        {"is_attack": True,  "category": "t3_attack"},
     "attack_mitigated":          {"is_attack": True,  "category": "t3_attack"},
     "attack_terminated":         {"is_attack": True,  "category": "t3_attack"},

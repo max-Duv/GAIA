@@ -544,6 +544,8 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
             'victim_legit_highpower': 'Legitimate High-Power',
             'temp_sync_control_novictim': 'Temp-Sync Control (No Victim)',
             'temp_sync_randomized_delay': 'Temp-Sync Randomized Delay',
+            'thermal_spike_hold': 'Thermal Spike + Hold',
+            'thermal_spike_release': 'Thermal Spike + Release',
         }
 
         rows = []
@@ -695,6 +697,8 @@ def generate_detector_breakdown(t1_df, out_dir):
         'victim_temp_sync_stress': 'Temp-Sync Attack',
         'victim_occupancy_stress': 'Occupancy Stress',
         'temp_sync_randomized_delay': 'Temp-Sync Randomized',
+        'thermal_spike_hold': 'Thermal Spike + Hold',
+        'thermal_spike_release': 'Thermal Spike + Release',
     }
 
     # --- Benign conditions: FPR ---

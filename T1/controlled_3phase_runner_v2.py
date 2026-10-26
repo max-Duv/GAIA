@@ -238,6 +238,30 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
             if temp_sync_log is not None:
                 temp_sync_log.append(temp_sync_data)
 
+        thermal_preheat = p_info.get("thermal_preheat", False)
+        if thermal_preheat and os.path.exists(cuda_binary):
+            from gpu_fault_assessor_v2 import _cuda_subprocess_env
+            preheat_dur = p_info.get("preheat_duration", 8)
+            pre_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
+            print(f"    [thermal] Pre-heating GPU ({preheat_dur}s sustained burst)... start={pre_temp:.1f}C")
+            preheat_cmd = [
+                cuda_binary, "--mode", "oversubscribe",
+                "--freq", "0.001", "--duty", "1.0",
+                "--duration", str(preheat_dur + 1)
+            ]
+            preheat_proc = subprocess.Popen(
+                preheat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=_cuda_subprocess_env()
+            )
+            time.sleep(preheat_dur)
+            preheat_proc.terminate()
+            try:
+                preheat_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                preheat_proc.kill()
+            post_temp = assessor.get_hardware_telemetry().get("gpu_temp_c", 0)
+            print(f"    [thermal] Post-heat temp: {post_temp:.1f}C (delta +{post_temp - pre_temp:.1f}C)")
+
         if p_mode is not None and os.path.exists(cuda_binary):
             cmd = [
                 cuda_binary,
@@ -422,6 +446,10 @@ def run_controlled_3phase_experiment(
          "temp_sync": True, "run_victim": False},
         {"name": "temp_sync_randomized_delay", "mode": "oversubscribe", "freq": 10.0, "duty": 0.5,
          "temp_sync": True},
+        {"name": "thermal_spike_hold", "mode": "oversubscribe", "freq": 0.001, "duty": 1.0,
+         "thermal_preheat": True, "preheat_duration": 8},
+        {"name": "thermal_spike_release", "mode": None, "freq": 0, "duty": 0.0,
+         "thermal_preheat": True, "preheat_duration": 8},
     ]
 
     if sweep_mechanism:
