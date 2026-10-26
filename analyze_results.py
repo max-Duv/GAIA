@@ -556,20 +556,17 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
                 continue
             trial_lat = sub.groupby('trial')['victim_total_latency_ms'].mean()
             trial_pow = sub.groupby('trial')['power_w'].mean()
-            min_v = sub['voltage_v'].min()
-            cap_count = ((sub['sw_power_cap'] == 1) | (sub['hw_slowdown'] == 1)).sum()
-            cap_rate = cap_count / len(sub) * 100
+            trial_temp = sub.groupby('trial')['gpu_temp_c'].mean()
             rows.append({
                 'Condition': phase_labels.get(pn, pn),
                 'Latency (ms)': f"${trial_lat.mean():.2f} \\pm {trial_lat.std():.2f}$",
                 'Power (W)': f"${trial_pow.mean():.2f} \\pm {trial_pow.std():.2f}$",
-                '$V_{\\min}$ (V)': f"${min_v:.4f}$",
-                'Throttle (\\%)': f"${cap_rate:.1f}$"
+                'Temp ($^\\circ$C)': f"${trial_temp.mean():.1f}$",
             })
 
         if rows:
             table_df = pd.DataFrame(rows)
-            latex = table_df.to_latex(index=False, escape=False, column_format='lcccc')
+            latex = table_df.to_latex(index=False, escape=False, column_format='lccc')
             path = os.path.join(out_dir, "table_t1_results.tex")
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(latex)

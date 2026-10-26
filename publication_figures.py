@@ -47,7 +47,7 @@ T3 = {
 
 
 def kernel_column(df):
-    for name in ('victim_kernel_ms', 'victim_gpu_compute_ms', 'victim_total_latency_ms'):
+    for name in ('victim_total_latency_ms', 'victim_kernel_ms', 'victim_gpu_compute_ms'):
         if name in df:
             return name
     raise ValueError('No victim timing column found')
@@ -165,15 +165,15 @@ def figure_t1_power_characterization(df, out_dir, tdp_w=None):
 @plt.rc_context(STYLE)
 def figure_t1_latency_degradation(df, out_dir):
     fig, axes = plt.subplots(1, 2, figsize=(PAGE_WIDTH, 3.3), layout='constrained')
-    summary(axes[0], df, kernel_column(df), CONDITIONS, 'Victim kernel time (ms)')
+    summary(axes[0], df, kernel_column(df), CONDITIONS, 'Victim total latency (ms)')
     summary(axes[1], df, 'power_w', CONDITIONS, 'Recorded power (W)')
-    axes[0].set_title('(a) Kernel time')
+    axes[0].set_title('(a) Victim latency')
     axes[1].set_title('(b) Power demand')
     save(fig, out_dir, 'fig2_t1_latency_degradation',
          'Open circles are individual trial means. Diamonds are equally weighted means of trial '
          'means; error bars are two-sided 95% Student-t confidence intervals across trials '
-         '(not independent telemetry samples). Intervals describe repeatability within this '
-         'experiment and do not remove systematic measurement bias. Lower kernel time means faster execution.')
+         '(not independent telemetry samples). Latency is total victim iteration time (kernel '
+         'execution plus launch and synchronization overhead). Lower latency means faster execution.')
 
 
 @plt.rc_context(STYLE)
@@ -213,7 +213,7 @@ def figure_t2_defense_diagnostics(df, out_dir):
 def figure_t3_mitigation(df, out_dir):
     fig, axes = plt.subplots(2, 2, figsize=(PAGE_WIDTH, 5.5), layout='constrained')
     summary(axes[0, 0], df, 'power_w', T3, 'Recorded power (W)')
-    summary(axes[0, 1], df, kernel_column(df), T3, 'Victim kernel time (ms)')
+    summary(axes[0, 1], df, kernel_column(df), T3, 'Victim total latency (ms)')
     axes[0, 0].set_title('(a) Power across trials')
     axes[0, 1].set_title('(b) Performance cost')
     trial = sorted(df.trial.unique())[0]
@@ -221,7 +221,7 @@ def figure_t3_mitigation(df, out_dir):
     if not g.empty:
         elapsed = g.timestamp - g.timestamp.iloc[0]
         axes[1, 0].plot(elapsed, g.power_w, color='#0072B2', lw=1.4)
-        axes[1, 1].plot(elapsed, g[kernel_column(g)], color='#D55E00', lw=1.4)
+        axes[1, 1].plot(elapsed, g[kernel_column(df)], color='#D55E00', lw=1.4)
         active = g.mitigation_active.to_numpy().astype(bool)
         if active.any():
             onset = elapsed.iloc[np.flatnonzero(active)[0]]
@@ -234,7 +234,7 @@ def figure_t3_mitigation(df, out_dir):
         for ax in axes[1]:
             ax.set_xlabel('Time since first phase sample (s)')
         axes[1, 0].set_ylabel('Recorded power (W)')
-        axes[1, 1].set_ylabel('Victim kernel time (ms)')
+        axes[1, 1].set_ylabel('Victim total latency (ms)')
     axes[1, 0].set_title(f'(c) Response timeline: trial {trial}')
     axes[1, 1].set_title(f'(d) Kernel timing: trial {trial}')
     save(fig, out_dir, 'fig4_t3_mitigation',
@@ -332,7 +332,7 @@ def figure_t1_sweep(df, out_dir):
         ax.margins(x=.08, y=.15)
 
     for ax, metric, label, title in zip(axes[0], ['power_w', kernel_column(df)],
-            ['Recorded power (W)', 'Victim kernel time (ms)'],
+            ['Recorded power (W)', 'Victim total latency (ms)'],
             ['(a) Frequency: power', '(b) Frequency: kernel time']):
         sweep_panel(ax, x, sweep_phases, metric, label, '#0072B2', True)
         ax.set_xlabel(x_label.replace('Pulsing', 'Configured pulse'))
@@ -341,7 +341,7 @@ def figure_t1_sweep(df, out_dir):
     if duty_phases:
         duty_x = np.array([int(p.replace('sweep_duty_', '').replace('pct', '')) for p in duty_phases])
         for ax, metric, label, title in zip(axes[1], ['power_w', kernel_column(df)],
-                ['Recorded power (W)', 'Victim kernel time (ms)'],
+                ['Recorded power (W)', 'Victim total latency (ms)'],
                 ['(c) Duty cycle: power', '(d) Duty cycle: kernel time']):
             sweep_panel(ax, duty_x, duty_phases, metric, label, '#D55E00')
             ax.set_xlabel('Configured duty cycle (%)')
