@@ -12,6 +12,8 @@
 \usepackage{tikz}
 \usetikzlibrary{positioning, calc, arrows.meta, shapes.geometric}
 \usepackage{pifont}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
 
 \sisetup{detect-weight=true, detect-family=true}
 
@@ -295,6 +297,55 @@ adversarial kernel's process (SIGTERM, with SIGKILL fallback after
 confirmation, kill method (SIGTERM vs SIGKILL), and elapsed kill
 time are recorded.  Post-kill power and victim latency recovery
 are measured for the remainder of the phase.
+
+Algorithm~\ref{alg:mitigate} formalizes the closed-loop pipeline.
+The monitor continuously samples hardware telemetry (line~4) and
+maintains a sliding window of the $W$ most recent power readings
+(line~5).  When the windowed mean exceeds the threshold $\theta$
+(line~7), the system selects a response strategy: clock capping
+reduces the GPU's maximum frequency via devfreq until power returns
+below threshold, while process termination identifies and kills the
+adversarial kernel, escalating from SIGTERM to SIGKILL if needed.
+Both strategies restore the original clock ceiling upon completion
+and export an anomaly flag for the Prometheus telemetry pipeline.
+
+\begin{algorithm}[t]
+\caption{Closed-Loop GPU Power Attack Mitigation}
+\label{alg:mitigate}
+\begin{algorithmic}[1]
+\Require Telemetry interface $\mathcal{T}$, threshold $\theta$,
+  window size $W$, mitigation clock $f_{\mathrm{mit}}$,
+  policy $\pi \in \{\textsc{Cap}, \textsc{Kill}\}$
+\Ensure Continuous monitoring with real-time response
+\State $f_{\max} \gets \Call{ReadMaxClock}{\text{devfreq}}$
+\State $\mathbf{b} \gets$ sliding buffer of capacity $W$
+\While{monitoring is active}
+  \State $s \gets \Call{SampleTelemetry}{\mathcal{T}}$
+    \Comment{INA3221 power, voltage; devfreq clock; thermal zone}
+  \State $\mathbf{b}.\Call{Append}{s}$
+  \If{$|\mathbf{b}| \geq W$}
+    \If{$\operatorname{mean}(\mathbf{b}.\text{power}) > \theta$}
+      \State \Call{ExportMetric}{\texttt{anomaly\_flag}, 1}
+      \If{$\pi = \textsc{Cap}$}
+        \State \Call{SetMaxClock}{devfreq, $f_{\mathrm{mit}}$}
+        \While{$\operatorname{mean}(\mathbf{b}.\text{power}) > \theta$}
+          \State $s \gets \Call{SampleTelemetry}{\mathcal{T}}$
+          \State $\mathbf{b}.\Call{Append}{s}$
+        \EndWhile
+        \State \Call{SetMaxClock}{devfreq, $f_{\max}$}
+      \ElsIf{$\pi = \textsc{Kill}$}
+        \State $p \gets \Call{IdentifyAdversarialPID}{}$
+        \State \Call{Signal}{$p$, \texttt{SIGTERM}}
+        \If{$p$ alive after timeout $\tau$}
+          \State \Call{Signal}{$p$, \texttt{SIGKILL}}
+        \EndIf
+        \State \Call{SetMaxClock}{devfreq, $f_{\max}$}
+      \EndIf
+    \EndIf
+  \EndIf
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
 
 Each trial runs five phases in sequence: \emph{attack\_unmitigated}
 (attack with no defense), \emph{attack\_mitigated} (attack with
