@@ -51,6 +51,7 @@ def compute_cohens_d(x, y):
 from publication_figures import (
     figure_t1_power_characterization, figure_t1_latency_degradation,
     figure_t2_defense_diagnostics, figure_t3_mitigation, figure_t1_sweep,
+    figure_t3_cnn_mitigation,
 )
 
 
@@ -608,6 +609,107 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
             print(f"  [saved] table_t3_results.tex")
 
 
+def generate_t3_cnn_tables(t3_synth, t3_train, t3_infer, out_dir):
+    """Generate cross-workload T3 mitigation comparison table and text report."""
+    print("\n[T3-CNN] Generating T3 CNN mitigation comparison tables...")
+    from scipy.stats import ttest_ind
+
+    datasets = []
+    if t3_synth is not None:
+        datasets.append(("Synthetic MatMul", t3_synth))
+    if t3_train is not None:
+        datasets.append(("CNN Training", t3_train))
+    if t3_infer is not None:
+        datasets.append(("CNN Inference", t3_infer))
+    if not datasets:
+        print("  [skip] No T3 data available")
+        return
+
+    phase_order = ['victim_clamped_baseline', 'attack_unmitigated', 'attack_mitigated',
+                   'attack_terminated', 'recovery_baseline']
+    phase_labels = {
+        'victim_clamped_baseline': 'Clamped Baseline',
+        'attack_unmitigated': 'Unmitigated',
+        'attack_mitigated': 'Cap Mitigated',
+        'attack_terminated': 'Kill Mitigated',
+        'recovery_baseline': 'Recovery',
+    }
+
+    lines = ["=" * 72, "T3: CNN VICTIM MITIGATION COMPARISON", "=" * 72]
+    tex_rows = []
+
+    for wlabel, df in datasets:
+        lines.append(f"\n--- {wlabel} ---")
+        agg = {}
+        for pn in phase_order:
+            sub = df[df['phase'] == pn]
+            if sub.empty:
+                continue
+            trial_lat = sub.groupby('trial')['victim_total_latency_ms'].mean()
+            trial_pow = sub.groupby('trial')['power_w'].mean()
+            agg[pn] = {
+                'lat_mean': trial_lat.mean(), 'lat_std': trial_lat.std(),
+                'pow_mean': trial_pow.mean(), 'pow_std': trial_pow.std(),
+                'lat_values': trial_lat.values, 'pow_values': trial_pow.values,
+            }
+            lines.append(f"  {phase_labels.get(pn, pn):<24s}: "
+                         f"lat={trial_lat.mean():.2f}±{trial_lat.std():.2f} ms, "
+                         f"pwr={trial_pow.mean():.2f}±{trial_pow.std():.2f} W")
+
+        if 'victim_clamped_baseline' in agg and 'attack_unmitigated' in agg:
+            base = agg['victim_clamped_baseline']['lat_mean']
+            unmit = agg['attack_unmitigated']['lat_mean']
+            degrad = (unmit - base) / base * 100
+            lines.append(f"  Attack degradation: {degrad:+.1f}%")
+
+            if 'attack_mitigated' in agg:
+                cap_lat = agg['attack_mitigated']['lat_mean']
+                cap_delta = (cap_lat - base) / base * 100
+                lines.append(f"  Cap vs baseline: {cap_delta:+.1f}%")
+                t_stat, p_val = ttest_ind(agg['attack_unmitigated']['lat_values'],
+                                          agg['attack_mitigated']['lat_values'])
+                lines.append(f"  t-test unmit vs cap: t={t_stat:.3f}, p={p_val:.4f}")
+
+            if 'attack_terminated' in agg:
+                kill_lat = agg['attack_terminated']['lat_mean']
+                kill_delta = (kill_lat - base) / base * 100
+                lines.append(f"  Kill vs baseline: {kill_delta:+.1f}%")
+
+            base_pwr = agg['victim_clamped_baseline']['pow_mean']
+            unmit_pwr = agg['attack_unmitigated']['pow_mean']
+            for strat, key in [('Cap', 'attack_mitigated'), ('Kill', 'attack_terminated')]:
+                if key in agg:
+                    pwr_red = (unmit_pwr - agg[key]['pow_mean']) / unmit_pwr * 100
+                    lines.append(f"  {strat} power reduction: {pwr_red:.1f}%")
+
+        for pn in phase_order:
+            if pn not in agg:
+                continue
+            a = agg[pn]
+            lat_str = f"${a['lat_mean']:.2f} \\pm {a['lat_std']:.2f}$"
+            pow_str = f"${a['pow_mean']:.2f} \\pm {a['pow_std']:.2f}$"
+            tex_rows.append(f"{wlabel} & {phase_labels[pn]} & {lat_str} & {pow_str} \\\\")
+        tex_rows.append("\\midrule")
+
+    summary_text = "\n".join(lines)
+    txt_path = os.path.join(out_dir, "t3_cnn_mitigation_report.txt")
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write(summary_text)
+    print(f"  [saved] t3_cnn_mitigation_report.txt")
+    print(summary_text)
+
+    if tex_rows and tex_rows[-1] == "\\midrule":
+        tex_rows.pop()
+    tex = "\\begin{tabular}{llcc}\n\\toprule\n"
+    tex += "Workload & Phase & Latency (ms) & Power (W) \\\\\n\\midrule\n"
+    tex += "\n".join(tex_rows) + "\n"
+    tex += "\\bottomrule\n\\end{tabular}\n"
+    tex_path = os.path.join(out_dir, "table_t3_cnn_comparison.tex")
+    with open(tex_path, 'w', encoding='utf-8') as f:
+        f.write(tex)
+    print(f"  [saved] table_t3_cnn_comparison.tex")
+
+
 # =============================================================================
 # Detector Breakdown: FPR by benign class, recall by attack type
 # =============================================================================
@@ -895,6 +997,8 @@ def main():
     t1_df = load_csv(args.results_dir, "t1_3phase_experiment.csv")
     sweep_df = load_csv(args.results_dir, "t1_sweep_experiment.csv")
     t3_df = load_csv(args.results_dir, "t3_closed_loop_mitigation.csv")
+    t3_train_df = load_csv(args.results_dir, "t3_training_mitigation.csv")
+    t3_infer_df = load_csv(args.results_dir, "t3_inference_mitigation.csv")
     train_df = load_csv(args.results_dir, "t1_training_victim.csv")
     infer_df = load_csv(args.results_dir, "t1_inference_victim.csv")
 
@@ -909,9 +1013,12 @@ def main():
     if t3_df is not None:
         figure_t3_mitigation(t3_df, out_dir)
 
+    figure_t3_cnn_mitigation(t3_df, t3_train_df, t3_infer_df, out_dir)
+
     if not args.figures_only:
         generate_metrics_report(t1_df, t3_df, sweep_df, out_dir)
         generate_latex_tables(t1_df, t3_df, out_dir)
+        generate_t3_cnn_tables(t3_df, t3_train_df, t3_infer_df, out_dir)
         generate_workload_comparison(t1_df, train_df, infer_df, out_dir)
         if t1_df is not None:
             generate_detector_breakdown(t1_df, out_dir)

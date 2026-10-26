@@ -355,3 +355,36 @@ def figure_t1_sweep(df, out_dir):
          'Settings are configured values, not independently measured pulse frequencies. '
          + ('Duty-cycle sweep uses the frequency configured in the experiment runner. '
             if duty_phases else ''))
+
+
+@plt.rc_context(STYLE)
+def figure_t3_cnn_mitigation(t3_synth, t3_train, t3_infer, out_dir):
+    """Side-by-side mitigation comparison across workload types."""
+    datasets = []
+    if t3_synth is not None:
+        datasets.append(('Synthetic MatMul', t3_synth))
+    if t3_train is not None:
+        datasets.append(('CNN Training', t3_train))
+    if t3_infer is not None:
+        datasets.append(('CNN Inference', t3_infer))
+    if len(datasets) < 2:
+        return
+
+    n = len(datasets)
+    fig, axes = plt.subplots(2, n, figsize=(PAGE_WIDTH, 5.0), layout='constrained')
+    if n == 1:
+        axes = axes.reshape(2, 1)
+
+    for col, (wlabel, df) in enumerate(datasets):
+        summary(axes[0, col], df, 'power_w', T3, 'Recorded power (W)')
+        summary(axes[1, col], df, kernel_column(df), T3, 'Victim latency (ms)')
+        axes[0, col].set_title(f'{wlabel}: Power')
+        axes[1, col].set_title(f'{wlabel}: Latency')
+
+    save(fig, out_dir, 'fig7_t3_cnn_mitigation',
+         'Mitigation comparison across workload types. Open circles are per-trial means; '
+         'diamonds with 95% Student-t CIs are equally weighted aggregate means. '
+         'Cap mitigation throttles GPU clock (1575→630 MHz); Kill terminates the adversarial process. '
+         'Training latency increases under cap because compute-bound kernels slow with lower clock. '
+         'Inference latency paradoxically improves under attack because the high clock benefits '
+         'lightweight kernels more than contention hurts them.')

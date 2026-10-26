@@ -17,7 +17,7 @@
 
 \sisetup{detect-weight=true, detect-family=true}
 
-\graphicspath{{../results_20261025_145758/figures/}}
+\graphicspath{{../results_20261025_193034/figures/}}
 
 \begin{document}
 
@@ -44,28 +44,29 @@ conditions---sustained cache-eviction stress, compute saturation,
 10\,kHz pulsed attacks, a temperature-synchronized variant, and their
 baselines---across 10 randomized trials, and measure their impact on
 three victim workload types.  Attacks elevate module-rail power from
-46.6\,W (baseline) to 86.4\,W (sustained stress), with peak
-instantaneous power reaching 104.6\,W (80.5\% of TDP).
+46.9\,W (baseline) to 86.0\,W (sustained stress), with peak
+instantaneous power reaching 105.4\,W (81.1\% of TDP).
 Attack effectiveness is strongly workload-dependent: sustained stress
-degrades co-located victim latency by $+$93\% for matrix-multiply,
-$+$32\% for CNN training, but only $+$7\% for CNN inference.
+degrades co-located victim latency by $+$92\% for matrix-multiply,
+$+$32\% for CNN training, but only $+$4\% for CNN inference.
 In Thrust~2, we evaluate two detection mechanisms:
-a power-level threshold detector (100\% precision, 62.8\% recall,
+a power-level threshold detector (100\% precision, 63.0\% recall,
 4.3\,s mean detection latency) and a logistic-regression classifier
-over windowed telemetry features (88.1\% accuracy, 92.7\% F1 via
+over windowed telemetry features (89.4\% accuracy, 93.6\% F1 via
 leave-one-trial-out cross-validation).  We report an honest limitation:
 the classifier's 44.4\% false-positive rate on legitimate high-power
 workloads indicates that power-level features alone are insufficient
 to distinguish adversarial from benign heavy computation.
-In Thrust~3, we close the loop with devfreq-based clock capping
-(18.3\% power reduction) and graceful adversarial-kernel termination
-(33.6\,W power recovery), integrated with a Prometheus-compatible
-telemetry exporter for industry-standard monitoring.
-\textbf{Placeholder:} T3 mitigation results on CNN training and
-inference victims are pending.
+In Thrust~3, we close the loop with two mitigation strategies---devfreq
+clock capping and graceful adversarial-kernel termination---integrated
+with Prometheus-compatible telemetry.  Crucially, mitigation
+effectiveness is workload-dependent: clock capping reduces power by
+23.5\% but \emph{worsens} CNN training latency by $+$74.5\%, while
+kill-based termination achieves 41--43\% power reduction with zero
+victim latency penalty across all workloads.
 Our results establish a complete attack--detect--mitigate pipeline and
 identify workload-dependent effectiveness as the key factor governing
-both attack impact and detection difficulty.
+attack impact, detection difficulty, and mitigation policy selection.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -375,15 +376,15 @@ voltage, utilization, and anomaly status.
 
 Table~\ref{tab:t1} summarizes the results across all conditions.
 All attack conditions significantly elevate GPU module-rail power
-above the 46.6\,W baseline.  Sustained stress produces the highest
-mean power at 86.4\,W ($1.86\times$ baseline), followed by cache-only
-at 84.5\,W, pulsed stress at 83.4\,W, and the
-temperature-synchronized variant at 83.6\,W.  Compute-only stress
+above the 46.9\,W baseline.  Sustained stress produces the highest
+mean power at 86.0\,W ($1.83\times$ baseline), followed by cache-only
+at 83.8\,W, pulsed stress at 83.4\,W, and the
+temperature-synchronized variant at 83.3\,W.  Compute-only stress
 elevates power to 61.7\,W ($1.32\times$ baseline), confirming that
 cache-eviction is the dominant power-draw mechanism.  The legitimate
-high-power workload ($4096^2$ matmul) reaches 72.3\,W---above the
+high-power workload ($4096^2$ matmul) reaches 72.2\,W---above the
 60\,W detection threshold, establishing a hard-negative baseline.
-Peak instantaneous power reaches 104.6\,W (80.5\% of the 130\,W TDP).
+Peak instantaneous power reaches 105.4\,W (81.1\% of the 130\,W TDP).
 
 All pairwise comparisons between attack and baseline conditions are
 statistically significant by paired $t$-test ($p < 0.001$,
@@ -394,7 +395,7 @@ $|\text{Cohen's } d| > 1.6$).
 \caption{Thrust~1: Attack characterization across 10 randomized
   trials (15\,s/phase).  Values are mean $\pm$ std across trial means.}
 \label{tab:t1}
-\input{../results_20261025_145758/figures/table_t1_results}
+\input{../results_20261025_193034/figures/table_t1_results}
 \end{table}
 
 \begin{figure*}[t]
@@ -413,8 +414,8 @@ trial bin means; bands show the interquartile range.}
 A key finding is that attack impact varies dramatically with the
 victim workload.  Table~\ref{tab:workload} summarizes the
 workload-dependent results.  Sustained stress degrades victim latency
-by $+$93\% for matrix multiply (3.57\,ms $\to$ 6.88\,ms), $+$32\% for
-CNN training, but only $+$7\% for CNN inference.
+by $+$92\% for matrix multiply (3.57\,ms $\to$ 6.86\,ms), $+$32\% for
+CNN training, but only $+$4\% for CNN inference.
 
 \begin{table}[t]
 \centering
@@ -422,7 +423,7 @@ CNN training, but only $+$7\% for CNN inference.
   the percentage increase in victim latency under sustained stress
   versus the victim-alone baseline.}
 \label{tab:workload}
-\input{../results_20261025_145758/figures/table_workload_comparison}
+\input{../results_20261025_193034/figures/table_workload_comparison}
 \end{table}
 
 The matrix-multiply victim is the most sensitive because it sustains
@@ -445,7 +446,7 @@ training jobs---are also the most vulnerable.
 \label{sec:latency}
 
 For the synthetic victim, attack conditions increase latency by
-$+$93\% (sustained) to $+$92\% (pulsed).  However, the lightweight
+$+$92\% (sustained) to $+$92\% (pulsed).  However, the lightweight
 assessor victim used in Thrust~3 mitigation experiments ($\sim$1.2\,ms
 baseline) shows the opposite behavior: latency \emph{decreases}
 under co-located load because the GPU's dynamic voltage--frequency
@@ -466,8 +467,8 @@ monitoring alone is not a reliable indicator of co-located power
 attacks}, because the direction and magnitude of latency change
 depends on the victim's GPU utilization pattern.  The attack's primary
 impact is on power draw and thermal state, not necessarily on execution
-time.  GPU temperature rises from 47.5\,$^\circ$C (alone) to
-51.3\,$^\circ$C (sustained stress).
+time.  GPU temperature rises from 47.3\,$^\circ$C (alone) to
+51.0\,$^\circ$C (sustained stress).
 
 \subsection{Mechanism Isolation}
 
@@ -516,7 +517,7 @@ The threshold detector ($\theta = 60$\,W) achieves the results shown
 in Table~\ref{tab:t2_det}.  The detector achieves zero false positives
 across 570 benign telemetry samples from the T3 experiment's
 clamped-baseline and recovery-baseline phases, with 100\% precision.
-Recall is 62.8\% (514/818 attack samples detected), limited by the
+Recall is 63.0\% (516/819 attack samples detected), limited by the
 4.3-second mean detection latency: the first several seconds of each
 attack phase are below threshold as the detector's sliding window
 fills with attack-level samples.
@@ -530,16 +531,16 @@ fills with attack-level samples.
 \toprule
 Phase & Samples & Detected & Rate \\
 \midrule
-Attack (unmitigated)  & 262 & 187 & TPR = 71.4\% \\
-Attack (mitigated)    & 276 & 201 & TPR = 72.8\% \\
-Attack (terminated)   & 280 & 126 & TPR = 45.0\% \\
-Clamped baseline      & 280 &   0 & FPR = 0.0\% \\
-Recovery baseline     & 290 &   0 & FPR = 0.0\% \\
+Attack (unmitigated)  & 264 & 189 & TPR = 71.6\% \\
+Attack (mitigated)    & 275 & 200 & TPR = 72.7\% \\
+Attack (terminated)   & 280 & 127 & TPR = 45.4\% \\
+Clamped baseline      & 282 &   0 & FPR = 0.0\% \\
+Recovery baseline     & 292 &   0 & FPR = 0.0\% \\
 \midrule
-\textbf{Aggregate} & \textbf{1388} & --- & --- \\
+\textbf{Aggregate} & \textbf{1393} & --- & --- \\
 \quad Precision & & & 100.0\% \\
-\quad Recall    & & & 62.8\% \\
-\quad F1-Score  & & & 77.2\% \\
+\quad Recall    & & & 63.0\% \\
+\quad F1-Score  & & & 77.3\% \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -548,7 +549,7 @@ Recovery baseline     & 290 &   0 & FPR = 0.0\% \\
 
 The logistic regression classifier, evaluated via leave-one-trial-out
 cross-validation with per-fold standardization, achieves:
-accuracy 88.1\%, precision 88.5\%, recall 97.5\%, F1-score 92.7\%
+accuracy 89.4\%, precision 88.6\%, recall 99.0\%, F1-score 93.6\%
 across 810 windows (180 benign, 630 attack) drawn from 10 held-out
 trials.
 
@@ -577,7 +578,7 @@ The overall false-positive rate on benign conditions is 44.4\%.
 \caption{Per-condition classifier breakdown (leave-one-trial-out CV).
   FPR is reported for benign conditions; recall for attack conditions.}
 \label{tab:detector_breakdown}
-\input{../results_20261025_145758/figures/table_detector_breakdown}
+\input{../results_20261025_193034/figures/table_detector_breakdown}
 \end{table}
 
 This result is expected: the classifier's features (mean power, power
@@ -624,8 +625,8 @@ false-positive rates on legitimate heavy workloads.
 
 Table~\ref{tab:t3} shows the five-phase mitigation results across
 5 trials with the synthetic assessor victim.  The devfreq clock cap
-($1575 \to 630$\,MHz) reduces attack-phase power by 18.3\%
-(84.3\,W $\to$ 68.8\,W), confirming that GPU clock management is an
+($1575 \to 630$\,MHz) reduces attack-phase power by 18.2\%
+(84.0\,W $\to$ 68.7\,W), confirming that GPU clock management is an
 effective lever for power reduction under adversarial load.
 
 \begin{table}[t]
@@ -634,7 +635,7 @@ effective lever for power reduction under adversarial load.
   15\,s/phase, synthetic victim).
   Clock cap: $1575 \to 630$\,MHz via devfreq.}
 \label{tab:t3}
-\input{../results_20261025_145758/figures/table_t3_results}
+\input{../results_20261025_193034/figures/table_t3_results}
 \end{table}
 
 \begin{figure}[t]
@@ -650,16 +651,16 @@ detection and clock-cap events.}
 
 The mitigation introduces a significant latency penalty for the
 assessor victim.  Victim latency increases from 1.20\,ms
-(unmitigated attack) to 3.94\,ms (mitigated attack), a $3.3\times$
+(unmitigated attack) to 3.93\,ms (mitigated attack), a $3.3\times$
 increase.  However, a portion of this increase is inherent to the
 clock cap itself: the clamped baseline (no attack, clock capped) shows
-2.86\,ms latency---a 1.34\,ms overhead versus the 1.53\,ms recovery
+2.87\,ms latency---a 1.34\,ms overhead versus the 1.53\,ms recovery
 baseline.  The decomposition is:
 
 \begin{align}
-\text{Gross latency change} &= B - A = 3.94 - 1.20 = +2.74\,\text{ms} \\
-\text{Clamping overhead} &= C - D = 2.86 - 1.53 = +1.34\,\text{ms} \\
-\text{Net attack effect} &= (B-A) - (C-D) = +1.41\,\text{ms}
+\text{Gross latency change} &= B - A = 3.93 - 1.20 = +2.73\,\text{ms} \\
+\text{Clamping overhead} &= C - D = 2.87 - 1.53 = +1.34\,\text{ms} \\
+\text{Net attack effect} &= (B-A) - (C-D) = +1.39\,\text{ms}
 \end{align}
 
 The paired $t$-test between unmitigated and mitigated attack latency
@@ -673,31 +674,73 @@ detecting the power anomaly, the system kills the adversarial process,
 eliminating the attack entirely.  Unlike clock capping, which
 constrains both attacker and victim equally, termination selectively
 removes the adversarial workload while allowing the victim to resume at
-full clock speed.  Across 5 trials, pre-kill power averages 80.4\,W,
-dropping to 46.8\,W post-kill---a 33.6\,W recovery.  Victim latency
-shifts from 1.20\,ms (under attack) to 1.40\,ms (post-kill), close to
+full clock speed.  Across 5 trials, pre-kill power averages 80.6\,W,
+dropping to 46.8\,W post-kill---a 33.8\,W recovery.  Victim latency
+shifts from 1.20\,ms (under attack) to 1.44\,ms (post-kill), close to
 the 1.53\,ms recovery baseline, confirming that the victim resumes
 normal operation.
 
 \subsection{Monitoring Overhead}
 
 The closed-loop monitoring pipeline adds a median overhead of 3.91\,ms
-per telemetry sample (p99 = 6.08\,ms, max = 119.0\,ms).  This is
+per telemetry sample (p99 = 6.69\,ms, max = 119.1\,ms).  This is
 acceptable for the 32\,Hz sampling rate but would need optimization
 for higher-rate DCGM-based deployments.
 
 \subsection{CNN Victim Mitigation}
 \label{sec:t3_cnn}
 
-\textbf{Placeholder:} Thrust~3 mitigation results with CNN training
-and inference victims are pending.  These experiments will determine
-whether the 18.3\% power reduction and $3.3\times$ latency cost
-observed with the synthetic victim generalize to realistic AI
-workloads.  Given the workload-dependent attack effectiveness
-(Section~\ref{sec:workload}), we expect the mitigation tradeoff to
-differ: the CNN inference victim, which suffers only $+$7\% latency
-degradation from the attack, may see disproportionate mitigation cost
-relative to the attack it prevents.
+We repeat the closed-loop mitigation experiment with CNN training and
+inference victims to determine whether the tradeoffs observed with the
+synthetic victim generalize to realistic AI workloads.
+Table~\ref{tab:t3_cnn} and Figure~\ref{fig:t3_cnn} summarize the
+results across all three workload types.
+
+\begin{table}[t]
+\centering
+\caption{Thrust~3: Cross-workload mitigation comparison (5 trials per
+  workload, 15\,s/phase). Cap: $1575 \to 630$\,MHz. Kill: SIGTERM
+  with SIGKILL escalation.}
+\label{tab:t3_cnn}
+\input{../results_20261025_193034/figures/table_t3_cnn_comparison}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig7_t3_cnn_mitigation.pdf}
+\caption{Mitigation effectiveness across workload types.  Cap mitigation
+  worsens training latency by capping the clock that compute-bound
+  kernels depend on; kill mitigation fully recovers performance by
+  selectively removing the adversary.}
+\label{fig:t3_cnn}
+\end{figure}
+
+\textbf{Training victim.}  The attack degrades CNN training latency by
+$+$10.8\% (4.08\,ms $\to$ 4.52\,ms).  Devfreq clock capping
+\emph{worsens} training latency to 7.12\,ms ($+$74.5\% over baseline),
+because the compute-bound training kernels depend on the clock frequency
+that the cap restricts.  Clock capping reduces power by 23.5\%
+(83.2\,W $\to$ 63.6\,W), but the latency penalty makes it
+counterproductive for compute-bound victims.  By contrast, graceful
+termination restores training latency to 3.51\,ms (13.9\% \emph{below}
+baseline, because the freed clock and compute resources benefit the
+victim) while achieving a 41.1\% power reduction.
+
+\textbf{Inference victim.}  The attack paradoxically \emph{improves}
+inference latency by $-$30.5\% (2.56\,ms $\to$ 1.78\,ms).  The clamped
+baseline runs at 321\,MHz; under attack, the GPU boosts to 1575\,MHz,
+and the lightweight inference kernels benefit more from the higher clock
+than they are harmed by contention.  Both cap mitigation (2.08\,ms) and
+kill mitigation (1.83\,ms) maintain acceptable latency.  The threat
+from inference-targeted attacks is power draw (83.4\,W), not latency
+degradation.  Kill mitigation achieves a 42.7\% power reduction.
+
+\textbf{Policy recommendation.}  These results demonstrate that
+mitigation policy must be workload-aware.  Clock capping is appropriate
+only when the victim is insensitive to clock frequency (lightweight
+inference); for compute-bound workloads (training, matrix multiply),
+graceful termination is the strictly superior strategy, achieving both
+larger power reductions and zero victim latency penalty.
 
 \subsection{Prometheus Integration}
 
@@ -722,10 +765,10 @@ Our results address the three questions posed by the GAIA proposal:
 \textbf{Can user-level GPU workloads measurably manipulate server
 power?}  Yes.  All attack conditions elevate module-rail power
 significantly above baseline, with sustained stress reaching
-$1.86\times$ the idle power level.  Peak power (104.6\,W) reaches
-80.5\% of TDP.  Attack effectiveness is strongly
-workload-dependent: $+$93\% latency degradation for matrix multiply,
-$+$32\% for CNN training, $+$7\% for CNN inference.
+$1.83\times$ the idle power level.  Peak power (105.4\,W) reaches
+81.1\% of TDP.  Attack effectiveness is strongly
+workload-dependent: $+$92\% latency degradation for matrix multiply,
+$+$32\% for CNN training, $+$4\% for CNN inference.
 
 \textbf{Can low-overhead telemetry detect these attacks?}  Yes, with
 significant caveats.  The power-level threshold detector achieves
@@ -738,10 +781,12 @@ dimensions (utilization counters, instruction profiles) are needed
 to close this gap.
 
 \textbf{Can mitigation be applied in real time?}  Yes, via two
-complementary strategies.  Devfreq clock capping reduces power by
-18.3\% with a $3.3\times$ latency cost for the assessor victim.
-Graceful kernel termination provides a more targeted response with a
-33.6\,W power recovery.
+complementary strategies with workload-dependent tradeoffs.  Devfreq
+clock capping reduces power by 18--24\% but worsens compute-bound
+victim latency by up to $+$74.5\% (CNN training).  Graceful kernel
+termination achieves 33--43\% power reduction with zero victim latency
+penalty, making it the strictly superior strategy for compute-bound
+workloads.  Mitigation policy must be workload-aware.
 
 \subsection{Temperature-Sync Trigger Limitation}
 
@@ -859,24 +904,29 @@ acceleration of cryptographic protocols.
 
 Project GAIA demonstrates that GPU microarchitectural power attacks
 are a viable threat on modern AI hardware.  User-level adversarial
-kernels elevate GPU power by up to $1.86\times$ baseline, with
-attack effectiveness that is strongly workload-dependent: $+$93\%
-latency degradation for compute-intensive victims but only $+$7\% for
+kernels elevate GPU power by up to $1.83\times$ baseline, with
+attack effectiveness that is strongly workload-dependent: $+$92\%
+latency degradation for compute-intensive victims but only $+$4\% for
 lightweight inference workloads.  A power-level threshold detector
-achieves 100\% precision with 62.8\% recall, and a logistic regression
-classifier reaches 88.1\% accuracy and 92.7\% F1, though its 44.4\%
+achieves 100\% precision with 63.0\% recall, and a logistic regression
+classifier reaches 89.4\% accuracy and 93.6\% F1, though its 44.4\%
 false-positive rate on legitimate high-power workloads demonstrates
 that power-level features alone are insufficient for production
 deployment.  Two closed-loop mitigation strategies---devfreq clock
-capping (18.3\% power reduction) and graceful adversarial-kernel
-termination (33.6\,W recovery)---demonstrate complementary tradeoffs
-for real-time response, integrated with a Prometheus-compatible
-telemetry exporter for industry-standard monitoring.
+capping (18--24\% power reduction) and graceful adversarial-kernel
+termination (33--43\% power recovery)---exhibit workload-dependent
+tradeoffs: clock capping worsens compute-bound victim latency by up to
+$+$74.5\%, while termination achieves larger power reductions with zero
+victim penalty, demonstrating that mitigation policy must be
+workload-aware.  All monitoring is integrated with a
+Prometheus-compatible telemetry exporter for industry-standard
+deployment.
 
 These experimental results establish the viability of a complete
 attack--detect--mitigate--monitor pipeline and identify
-workload-dependent attack effectiveness and classifier discrimination
-as the two key challenges for practical deployment.
+workload-dependent attack effectiveness, classifier discrimination,
+and mitigation policy selection as the three key challenges for
+practical deployment.
 Future work will extend to multi-GPU data center hardware with NVIDIA
 DCGM telemetry, MIG isolation, multi-modal detection features, and
 adaptive adversarial strategies.
