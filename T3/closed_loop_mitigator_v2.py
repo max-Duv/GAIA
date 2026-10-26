@@ -168,7 +168,7 @@ def _run_single_trial(
         phase_start = time.time()
 
         while (time.time() - phase_start) < duration_per_phase:
-            v_res = victim.run_iteration() if victim else assessor.run_victim_workload_iteration()
+            v_res = victim() if victim else assessor.run_victim_workload_iteration()
             latencies_tot.append(v_res["total_latency_ms"])
             latencies_compute.append(v_res["gpu_compute_ms"])
 
