@@ -344,10 +344,10 @@ def run_closed_loop_experiment(
 
     victim = None
     if victim_type == "training":
-        victim = TrainingVictim(gpu_idx=gpu_idx)
+        victim = TrainingVictim(device_idx=gpu_idx)
         print(f"[+] Victim workload: CNN Training")
     elif victim_type == "inference":
-        victim = InferenceVictim(gpu_idx=gpu_idx)
+        victim = InferenceVictim(device_idx=gpu_idx)
         print(f"[+] Victim workload: CNN Inference")
     else:
         print(f"[+] Victim workload: Synthetic (assessor default)")
