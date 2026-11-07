@@ -39,7 +39,12 @@ _EXE = ".exe" if sys.platform == "win32" else ""
 
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2, CONDITION_LABELS, collect_platform_info
 from gpu_defense_filters_v2 import PlatformAgnosticAnomalyDetector
-from realistic_victims import TrainingVictim, InferenceVictim, LegitimateHighPowerWorkload
+
+try:
+    from realistic_victims import TrainingVictim, InferenceVictim, LegitimateHighPowerWorkload
+    _PYTORCH_VICTIMS = True
+except (ImportError, RuntimeError):
+    _PYTORCH_VICTIMS = False
 
 
 BLINDED_CONDITION_LABELS = {
@@ -328,6 +333,84 @@ class VictimRunner:
         return os.getpid()
 
 
+class SubprocessVictimRunner:
+    """Runs the compiled CUDA victim binary as a separate process with its own PID.
+
+    Used when PyTorch is not available. Each instance runs the victim kernel
+    in a loop, giving the attribution system distinct PIDs to sort through.
+    """
+
+    def __init__(self, name, victim_binary, elements=16777216, inner_iters=64):
+        self.name = name
+        self._binary = victim_binary
+        self._elements = elements
+        self._inner_iters = inner_iters
+        self._proc = None
+        self.latencies = []
+        self._running = False
+        self._monitor_thread = None
+
+    def start(self):
+        from gpu_fault_assessor_v2 import _cuda_subprocess_env
+        cmd = [
+            self._binary,
+            "--reps", "999999",
+            "--elements", str(self._elements),
+            "--inner-iters", str(self._inner_iters),
+        ]
+        self._proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=_cuda_subprocess_env(),
+        )
+        self._running = True
+        self._monitor_thread = threading.Thread(target=self._read_output, daemon=True)
+        self._monitor_thread.start()
+        print(f"    [victim-proc] '{self.name}' started as PID {self._proc.pid}")
+
+    def _read_output(self):
+        import re
+        pattern = re.compile(r"VICTIM_LATENCY_MS:\s*([\d.]+)")
+        while self._running and self._proc and self._proc.poll() is None:
+            try:
+                line = self._proc.stdout.readline()
+                if not line:
+                    break
+                m = pattern.search(line)
+                if m:
+                    ms = float(m.group(1))
+                    self.latencies.append({
+                        "timestamp": time.time(),
+                        "total_latency_ms": ms,
+                        "gpu_compute_ms": ms,
+                        "backend": f"cuda_subprocess_{self.name}",
+                    })
+            except Exception:
+                break
+
+    def stop(self):
+        self._running = False
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        self._proc = None
+
+    def get_recent_latency(self, last_n=10):
+        if not self.latencies:
+            return 0.0
+        recent = self.latencies[-last_n:]
+        return float(np.mean([r["total_latency_ms"] for r in recent]))
+
+    def clear_latencies(self):
+        self.latencies.clear()
+
+    @property
+    def pid(self):
+        return self._proc.pid if self._proc else 0
+
+
 def run_blinded_attribution_experiment(
     cuda_binary=None,
     duration_per_phase=20.0,
@@ -357,9 +440,28 @@ def run_blinded_attribution_experiment(
     assessor = GPUFaultAssessorV2(target_gpu_index=gpu_idx)
 
     print("[+] Initializing legitimate workloads...")
-    training_victim = TrainingVictim(device_idx=gpu_idx)
-    inference_victim = InferenceVictim(device_idx=gpu_idx)
-    highpower_victim = LegitimateHighPowerWorkload(device_idx=gpu_idx) if include_highpower else None
+    victim_binary = os.path.join(PARENT_DIR, "T1", "gpu_victim_kernel" + _EXE)
+    use_subprocess_victims = not _PYTORCH_VICTIMS
+
+    if use_subprocess_victims:
+        if not os.path.exists(victim_binary):
+            from realistic_victims import SyntheticMatmulVictim
+            _tmp = SyntheticMatmulVictim(device_idx=gpu_idx)
+            del _tmp
+        if not os.path.exists(victim_binary):
+            raise FileNotFoundError(
+                f"Victim binary not found: {victim_binary}\n"
+                "Compile gpu_victim_kernel.cu first.")
+        print("    [!] PyTorch not available — using subprocess CUDA victims (separate PIDs)")
+
+    if use_subprocess_victims:
+        training_victim = None
+        inference_victim = None
+        highpower_victim = None
+    else:
+        training_victim = TrainingVictim(device_idx=gpu_idx)
+        inference_victim = InferenceVictim(device_idx=gpu_idx)
+        highpower_victim = LegitimateHighPowerWorkload(device_idx=gpu_idx) if include_highpower else None
 
     output_dir = os.path.dirname(output_csv) or "."
     platform_info = collect_platform_info()
@@ -397,12 +499,24 @@ def run_blinded_attribution_experiment(
             power_anomaly_threshold_w=detection_threshold_w,
         )
 
-        runners = [
-            VictimRunner("training", training_victim),
-            VictimRunner("inference", inference_victim),
-        ]
-        if highpower_victim:
-            runners.append(VictimRunner("highpower", highpower_victim))
+        if use_subprocess_victims:
+            runners = [
+                SubprocessVictimRunner("training", victim_binary,
+                                       elements=16777216, inner_iters=64),
+                SubprocessVictimRunner("inference", victim_binary,
+                                       elements=4194304, inner_iters=16),
+            ]
+            if include_highpower:
+                runners.append(SubprocessVictimRunner(
+                    "highpower", victim_binary,
+                    elements=67108864, inner_iters=128))
+        else:
+            runners = [
+                VictimRunner("training", training_victim),
+                VictimRunner("inference", inference_victim),
+            ]
+            if highpower_victim:
+                runners.append(VictimRunner("highpower", highpower_victim))
 
         known_legit_pids = {our_pid}
 
