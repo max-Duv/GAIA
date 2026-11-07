@@ -155,76 +155,34 @@ def enumerate_gpu_processes(exclude_pids=None):
     return list(discovered.values())
 
 
-def sample_pmon_utilization(num_samples=5, interval=1.0, exclude_pids=None):
-    """Sample nvidia-smi pmon multiple times and return per-PID average SM%.
-
-    Returns dict: {pid: {"name": str, "sm_pct": float, "mem_pct": float, "samples": int}}
-    """
-    if exclude_pids is None:
-        exclude_pids = set()
-    pid_data = {}
-
-    for _ in range(num_samples):
-        try:
-            res = subprocess.run(
-                ["nvidia-smi", "pmon", "-c", "1", "-s", "u"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=5,
-            )
-            if res.returncode == 0:
-                for line in res.stdout.strip().split("\n"):
-                    line = line.strip()
-                    if line.startswith("#") or not line:
-                        continue
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        try:
-                            pid = int(parts[1])
-                            if pid <= 0 or pid in exclude_pids:
-                                continue
-                            sm = parts[3] if len(parts) > 3 else "-"
-                            mem = parts[4] if len(parts) > 4 else "-"
-                            name = parts[-1] if len(parts) >= 8 else "unknown"
-                            sm_val = int(sm) if sm != "-" else 0
-                            mem_val = int(mem) if mem != "-" else 0
-
-                            if pid not in pid_data:
-                                pid_data[pid] = {"name": name, "sm_vals": [],
-                                                 "mem_vals": [], "samples": 0}
-                            pid_data[pid]["sm_vals"].append(sm_val)
-                            pid_data[pid]["mem_vals"].append(mem_val)
-                            pid_data[pid]["samples"] += 1
-                        except ValueError:
-                            continue
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+def measure_power_mean(assessor, duration=2.0, interval=0.05):
+    """Collect power readings and return mean."""
+    readings = []
+    start = time.time()
+    while time.time() - start < duration:
+        hw = assessor.get_hardware_telemetry()
+        readings.append(hw["power_w"])
         time.sleep(interval)
-
-    result = {}
-    for pid, d in pid_data.items():
-        result[pid] = {
-            "name": d["name"],
-            "sm_pct": float(np.mean(d["sm_vals"])) if d["sm_vals"] else 0.0,
-            "mem_pct": float(np.mean(d["mem_vals"])) if d["mem_vals"] else 0.0,
-            "samples": d["samples"],
-        }
-    return result
+    return float(np.mean(readings)) if readings else 0.0
 
 
 def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker_pid,
                                measure_duration=2.0):
-    """Blinded adversary attribution via GPU utilization profiling.
+    """Blinded adversary attribution via sequential elimination.
 
-    Samples per-process GPU SM utilization via nvidia-smi pmon over several
-    seconds. The process with the highest GPU compute utilization that is
-    not a known system desktop process is identified as the adversary.
+    On Jetson (shared power domain, no per-process GPU utilization from pmon,
+    and SIGSTOP does not preempt GPU kernels), the only reliable attribution
+    signal is: SIGKILL a candidate, wait for GPU context teardown, and measure
+    whether total power drops below the anomaly threshold.
 
-    SIGSTOP-based attribution fails on GPUs because GPU kernels persist
-    beyond process suspension. Per-process utilization from the GPU driver
-    is the reliable signal.
+    System desktop processes (Xorg, gnome-shell) are skipped entirely.
+    Remaining candidates are killed one at a time, most-recently-started first
+    (heuristic: adversary likely appeared after baseline was established).
 
-    The ground_truth_attacker_pid is ONLY used for accuracy scoring after
-    the fact — it is never consulted during attribution.
+    Metrics: correct_attribution, innocent_kills (processes killed before
+    finding the attacker), and attribution_latency_s.
+
+    The ground_truth_attacker_pid is ONLY used for post-hoc accuracy scoring.
     """
     attribution_start = time.time()
 
@@ -251,67 +209,86 @@ def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker
     for c in candidates:
         print(f"      PID {c['pid']:>7d}  {c['name']:<24s}  (via {c['method']})")
 
-    if len(candidates) == 1:
-        suspect = candidates[0]
-        print(f"    [attrib] Single candidate PID {suspect['pid']} — terminating directly")
+    non_system = [c for c in candidates if c["name"] not in SYSTEM_PROCESS_NAMES]
+    skipped = [c for c in candidates if c["name"] in SYSTEM_PROCESS_NAMES]
+    if skipped:
+        print(f"    [attrib] Skipping {len(skipped)} system process(es): "
+              + ", ".join(f"{c['name']}({c['pid']})" for c in skipped))
+
+    if not non_system:
+        return {
+            "success": False,
+            "reason": "only_system_processes",
+            "attribution_latency_s": time.time() - attribution_start,
+            "candidates_found": len(candidates),
+            "innocent_kills": 0,
+            "correct_attribution": False,
+            "killed_pid": None,
+            "enum_method": candidates[0]["method"] if candidates else "none",
+        }
+
+    non_system.sort(key=lambda c: c["pid"], reverse=True)
+
+    if len(non_system) == 1:
+        suspect = non_system[0]
+        print(f"    [attrib] Single non-system candidate PID {suspect['pid']} "
+              f"— terminating directly")
     else:
-        print(f"    [attrib] Sampling GPU utilization (5 × 1s)...")
-        util_data = sample_pmon_utilization(
-            num_samples=5, interval=1.0, exclude_pids=known_legit_pids)
+        pre_power = measure_power_mean(assessor, duration=measure_duration)
+        print(f"    [attrib] Pre-attribution power: {pre_power:.2f} W")
+        print(f"    [attrib] Sequential elimination ({len(non_system)} candidates, "
+              f"newest PID first)...")
 
-        scores = []
-        for cand in candidates:
+        suspect = non_system[-1]
+        innocent_count = 0
+
+        for i, cand in enumerate(non_system):
             pid = cand["pid"]
-            is_system = cand["name"] in SYSTEM_PROCESS_NAMES
-            if pid in util_data:
-                u = util_data[pid]
-                sm = u["sm_pct"]
-                mem = u["mem_pct"]
-                score = sm + 0.5 * mem
-                if is_system:
-                    score *= 0.01
-                print(f"      PID {pid:>7d} ({cand['name']:<16s}): "
-                      f"SM={sm:5.1f}%  Mem={mem:5.1f}%  "
-                      f"score={score:.1f}{' [system]' if is_system else ''}")
+            print(f"      [{i+1}/{len(non_system)}] Killing PID {pid} "
+                  f"({cand['name']})...", end="", flush=True)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError) as e:
+                print(f" failed ({e})")
+                continue
+
+            time.sleep(2.0)
+            post_power = measure_power_mean(assessor, duration=measure_duration)
+            drop = pre_power - post_power
+            print(f" power={post_power:.2f}W (Δ{-drop:+.2f}W)")
+
+            if drop > 5.0:
+                suspect = cand
+                print(f"    [attrib] Significant power drop ({drop:.1f}W) — "
+                      f"PID {pid} identified as adversary")
+                break
             else:
-                sm, mem, score = 0.0, 0.0, 0.0
-                print(f"      PID {pid:>7d} ({cand['name']:<16s}): "
-                      f"no pmon data, score=0")
-            scores.append(score)
+                innocent_count += 1
+                pre_power = post_power
 
-        max_idx = int(np.argmax(scores))
-        suspect = candidates[max_idx]
-        print(f"    [attrib] Highest scorer: PID {suspect['pid']} "
-              f"(score={scores[max_idx]:.1f})")
+        else:
+            suspect = non_system[0]
+            print(f"    [attrib] No large drop found; last candidate "
+                  f"PID {suspect['pid']} is suspect")
 
-    # Terminate the suspect
     killed_pid = suspect["pid"]
-    kill_start = time.time()
-    kill_method = "none"
-    kill_exit = None
-    try:
-        os.kill(killed_pid, signal.SIGTERM)
-        kill_method = "SIGTERM"
-        time.sleep(1.0)
+    kill_method = "SIGKILL"
+
+    if len(non_system) == 1:
+        innocent_count = 0
         try:
-            os.kill(killed_pid, 0)
             os.kill(killed_pid, signal.SIGKILL)
-            kill_method = "SIGKILL"
         except ProcessLookupError:
-            pass
-    except ProcessLookupError:
-        kill_method = "already_dead"
-    except PermissionError:
-        kill_method = "permission_denied"
+            kill_method = "already_dead"
+        except PermissionError:
+            kill_method = "permission_denied"
+        time.sleep(1.0)
 
-    kill_elapsed = time.time() - kill_start
     attribution_latency = time.time() - attribution_start
-
     correct = (killed_pid == ground_truth_attacker_pid)
-    innocent_kills = 0 if correct else 1
 
-    print(f"    [attrib] Terminated PID {killed_pid} via {kill_method} "
-          f"in {kill_elapsed:.3f}s")
+    print(f"    [attrib] Attributed PID {killed_pid} via {kill_method} "
+          f"({innocent_count} innocent kill(s))")
     print(f"    [attrib] Correct attribution: {correct} "
           f"(ground truth: {ground_truth_attacker_pid})")
     print(f"    [attrib] Total attribution latency: {attribution_latency:.3f}s")
@@ -321,12 +298,12 @@ def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker
         "reason": "attributed",
         "attribution_latency_s": round(attribution_latency, 4),
         "candidates_found": len(candidates),
-        "innocent_kills": innocent_kills,
+        "innocent_kills": innocent_count,
         "correct_attribution": correct,
         "killed_pid": killed_pid,
         "ground_truth_pid": ground_truth_attacker_pid,
         "kill_method": kill_method,
-        "kill_elapsed_s": round(kill_elapsed, 4),
+        "kill_elapsed_s": round(attribution_latency, 4),
         "enum_method": candidates[0]["method"] if candidates else "none",
     }
 
