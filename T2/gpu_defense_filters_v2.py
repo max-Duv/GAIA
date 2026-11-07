@@ -5,8 +5,12 @@ import argparse
 import numpy as np
 import pandas as pd
 import scipy.signal as signal
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
+try:
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
 
 import matplotlib
 matplotlib.use('Agg')
@@ -275,6 +279,12 @@ class PlatformAgnosticAnomalyDetector:
         Sxx_db = 10 * np.log10(Sxx + 1e-10)
 
         print("[+] Executing PCA State-Separability Cluster Fitting...")
+        if not _SKLEARN_AVAILABLE:
+            print("    [SKIP] sklearn not installed — PCA analysis unavailable")
+            projected, labels_arr = np.zeros((1, 2)), np.array([0])
+            self._generate_diagnostic_plots(df, freqs, times, Sxx_db, projected, labels_arr, output_png, fs_est)
+            print("[+] Batch processing finished (PCA skipped).")
+            return
         features = []
         labels = []
         window_size = min(len(df) // 10, 50)

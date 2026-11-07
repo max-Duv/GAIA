@@ -34,19 +34,59 @@ def _ensure_torch():
 
 
 class SyntheticMatmulVictim:
-    """Existing matmul microbenchmark, wrapped for the unified interface."""
+    """Matmul microbenchmark. Uses PyTorch if available, else compiled CUDA kernel."""
 
     def __init__(self, device_idx=0, matrix_size=2048):
-        import torch
-        self.device = torch.device(f"cuda:{device_idx}")
         self.matrix_size = matrix_size
-        self.A = torch.randn(matrix_size, matrix_size, device=self.device)
-        self.B = torch.randn(matrix_size, matrix_size, device=self.device)
-        self._start_event = torch.cuda.Event(enable_timing=True)
-        self._end_event = torch.cuda.Event(enable_timing=True)
-        torch.cuda.synchronize(self.device)
+        self._use_torch = _ensure_torch()
+        if self._use_torch:
+            import torch
+            self.device = torch.device(f"cuda:{device_idx}")
+            self.A = torch.randn(matrix_size, matrix_size, device=self.device)
+            self.B = torch.randn(matrix_size, matrix_size, device=self.device)
+            self._start_event = torch.cuda.Event(enable_timing=True)
+            self._end_event = torch.cuda.Event(enable_timing=True)
+            torch.cuda.synchronize(self.device)
+        else:
+            import subprocess, re
+            self._subprocess = subprocess
+            self._re = re
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            self._victim_binary = os.path.join(script_dir, "gpu_victim_kernel")
+            self._compiled = os.path.exists(self._victim_binary)
+            if not self._compiled:
+                self._compile(script_dir)
+            print(f"[victims] Using compiled CUDA victim (no PyTorch)")
+
+    def _compile(self, script_dir):
+        src = os.path.join(script_dir, "gpu_victim_kernel.cu")
+        if not os.path.exists(src):
+            raise FileNotFoundError(f"Victim kernel source not found: {src}")
+        arch = self._detect_arch()
+        print(f"[victims] Compiling victim kernel ({arch})...")
+        cmd = ["nvcc", "-O3", f"-arch={arch}", src, "-o", self._victim_binary, "-lcuda"]
+        res = self._subprocess.run(cmd, stdout=self._subprocess.PIPE,
+                                   stderr=self._subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(f"Victim kernel compilation failed:\n{res.stderr}")
+        self._compiled = True
+
+    @staticmethod
+    def _detect_arch():
+        try:
+            out = __import__("subprocess").check_output(
+                ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                text=True).strip().split("\n")[0].replace(".", "")
+            return f"sm_{out}"
+        except Exception:
+            return "sm_87"
 
     def __call__(self):
+        if self._use_torch:
+            return self._call_torch()
+        return self._call_cuda()
+
+    def _call_torch(self):
         import torch
         t0 = time.perf_counter()
         self._start_event.record()
@@ -61,6 +101,29 @@ class SyntheticMatmulVictim:
             "gpu_compute_ms": gpu_ms,
             "launch_delay_ms": max(total_ms - gpu_ms, 0.0),
             "victim_backend": "synthetic_matmul",
+        }
+
+    def _call_cuda(self):
+        t0 = time.perf_counter()
+        cmd = [self._victim_binary, "--reps", "1", "--elements", "16777216",
+               "--inner-iters", "64"]
+        proc = self._subprocess.Popen(cmd, stdout=self._subprocess.PIPE,
+                                      stderr=self._subprocess.PIPE, text=True)
+        try:
+            stdout, stderr = proc.communicate(timeout=15)
+        except self._subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+            return {"total_latency_ms": 15000.0, "gpu_compute_ms": 15000.0,
+                    "launch_delay_ms": 0.0, "victim_backend": "synthetic_cuda_timeout"}
+        t1 = time.perf_counter()
+        match = self._re.search(r"VICTIM_LATENCY_MS:\s*([\d.]+)", stdout)
+        gpu_ms = float(match.group(1)) if match else (t1 - t0) * 1000.0
+        return {
+            "total_latency_ms": (t1 - t0) * 1000.0,
+            "gpu_compute_ms": gpu_ms,
+            "launch_delay_ms": 0.0,
+            "victim_backend": "synthetic_cuda_compiled",
         }
 
 
@@ -263,16 +326,17 @@ VICTIM_TYPES = {
 
 
 def create_victim(victim_type, device_idx=0, **kwargs):
-    if not _ensure_torch():
-        raise RuntimeError(
-            "PyTorch with CUDA required for realistic victims. "
-            "On Jetson, install from NVIDIA JetPack wheels."
-        )
     cls = VICTIM_TYPES.get(victim_type)
     if cls is None:
         raise ValueError(
             f"Unknown victim type '{victim_type}'. "
             f"Available: {list(VICTIM_TYPES.keys())}"
+        )
+    if victim_type != "synthetic" and not _ensure_torch():
+        raise RuntimeError(
+            f"PyTorch with CUDA required for '{victim_type}' victim. "
+            "On Jetson, install from NVIDIA JetPack wheels. "
+            "Use --victim-type synthetic for CUDA-only fallback."
         )
     return cls(device_idx=device_idx, **kwargs)
 
