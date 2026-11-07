@@ -427,15 +427,19 @@ class GPUFaultAssessorV2:
             if res.get("sm_clock_mhz", 0) == 0 and self._devfreq_path:
                 try:
                     with open(os.path.join(self._devfreq_path, 'cur_freq')) as f:
-                        res["sm_clock_mhz"] = int(f.read().strip()) // 1_000_000
-                except (IOError, OSError, ValueError):
+                        raw = f.read()
+                        if raw:
+                            res["sm_clock_mhz"] = int(raw.strip()) // 1_000_000
+                except (IOError, OSError, ValueError, TypeError):
                     pass
 
             if res.get("gpu_temp_c", 0) == 0 and self._thermal_path:
                 try:
                     with open(os.path.join(self._thermal_path, 'temp')) as f:
-                        res["gpu_temp_c"] = int(f.read().strip()) / 1000.0
-                except (IOError, OSError, ValueError):
+                        raw = f.read()
+                        if raw:
+                            res["gpu_temp_c"] = int(raw.strip()) / 1000.0
+                except (IOError, OSError, ValueError, TypeError):
                     pass
 
         if jtop_data and jtop_data.get("power_w", 0) > 0:

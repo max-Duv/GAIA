@@ -167,22 +167,17 @@ def measure_power_mean(assessor, duration=2.0, interval=0.05):
 
 
 def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker_pid,
-                               measure_duration=2.0):
+                               baseline_power_w=None, measure_duration=2.0):
     """Blinded adversary attribution via sequential elimination.
 
-    On Jetson (shared power domain, no per-process GPU utilization from pmon,
-    and SIGSTOP does not preempt GPU kernels), the only reliable attribution
-    signal is: SIGKILL a candidate, wait for GPU context teardown, and measure
-    whether total power drops below the anomaly threshold.
+    On Jetson Thor the attacker's duty-cycled GPU kernel causes DVFS
+    clock contention that REDUCES total power.  Killing the attacker
+    therefore INCREASES power back toward the baseline.  We exploit this:
+    kill each candidate (newest PID first), measure power, and attribute
+    to the process whose removal moves power closest to baseline.
 
-    System desktop processes (Xorg, gnome-shell) are skipped entirely.
-    Remaining candidates are killed one at a time, most-recently-started first
-    (heuristic: adversary likely appeared after baseline was established).
-
-    Metrics: correct_attribution, innocent_kills (processes killed before
-    finding the attacker), and attribution_latency_s.
-
-    The ground_truth_attacker_pid is ONLY used for post-hoc accuracy scoring.
+    If baseline_power_w is not provided, falls back to largest absolute
+    power change.
     """
     attribution_start = time.time()
 
@@ -231,16 +226,26 @@ def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker
 
     if len(non_system) == 1:
         suspect = non_system[0]
+        innocent_count = 0
         print(f"    [attrib] Single non-system candidate PID {suspect['pid']} "
               f"— terminating directly")
+        try:
+            os.kill(suspect["pid"], signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        time.sleep(1.0)
     else:
         pre_power = measure_power_mean(assessor, duration=measure_duration)
-        print(f"    [attrib] Pre-attribution power: {pre_power:.2f} W")
+        anomaly_dist = abs(pre_power - baseline_power_w) if baseline_power_w else 0
+        print(f"    [attrib] Pre-attribution power: {pre_power:.2f} W"
+              + (f"  (baseline: {baseline_power_w:.1f} W, "
+                 f"deviation: {anomaly_dist:.1f} W)"
+                 if baseline_power_w else ""))
         print(f"    [attrib] Sequential elimination ({len(non_system)} candidates, "
               f"newest PID first)...")
 
-        suspect = non_system[-1]
-        innocent_count = 0
+        kill_results = []
+        prev_power = pre_power
 
         for i, cand in enumerate(non_system):
             pid = cand["pid"]
@@ -250,44 +255,44 @@ def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError) as e:
                 print(f" failed ({e})")
+                kill_results.append((cand, prev_power, prev_power, 0.0))
                 continue
 
             time.sleep(2.0)
             post_power = measure_power_mean(assessor, duration=measure_duration)
-            drop = pre_power - post_power
-            print(f" power={post_power:.2f}W (Δ{-drop:+.2f}W)")
+            delta = post_power - prev_power
+            print(f" power={post_power:.2f}W (Δ{delta:+.2f}W)")
 
-            if drop > 5.0:
-                suspect = cand
-                print(f"    [attrib] Significant power drop ({drop:.1f}W) — "
-                      f"PID {pid} identified as adversary")
-                break
-            else:
-                innocent_count += 1
-                pre_power = post_power
+            kill_results.append((cand, prev_power, post_power, delta))
+            prev_power = post_power
 
+        if baseline_power_w is not None:
+            best_idx = -1
+            best_recovery = -1.0
+            running_power = pre_power
+            for idx, (cand, pre, post, delta) in enumerate(kill_results):
+                pre_dist = abs(running_power - baseline_power_w)
+                post_dist = abs(post - baseline_power_w)
+                recovery = pre_dist - post_dist
+                running_power = post
+                print(f"      PID {cand['pid']}: deviation {pre_dist:.1f}W → "
+                      f"{post_dist:.1f}W (recovery={recovery:+.1f}W)")
+                if recovery > best_recovery:
+                    best_recovery = recovery
+                    best_idx = idx
         else:
-            suspect = non_system[0]
-            print(f"    [attrib] No large drop found; last candidate "
-                  f"PID {suspect['pid']} is suspect")
+            best_idx = int(np.argmax([abs(kr[3]) for kr in kill_results]))
+
+        suspect = kill_results[best_idx][0]
+        innocent_count = len(kill_results) - 1
+        print(f"    [attrib] Best recovery from PID {suspect['pid']} "
+              f"— identified as adversary")
 
     killed_pid = suspect["pid"]
-    kill_method = "SIGKILL"
-
-    if len(non_system) == 1:
-        innocent_count = 0
-        try:
-            os.kill(killed_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            kill_method = "already_dead"
-        except PermissionError:
-            kill_method = "permission_denied"
-        time.sleep(1.0)
-
     attribution_latency = time.time() - attribution_start
     correct = (killed_pid == ground_truth_attacker_pid)
 
-    print(f"    [attrib] Attributed PID {killed_pid} via {kill_method} "
+    print(f"    [attrib] Attributed PID {killed_pid} "
           f"({innocent_count} innocent kill(s))")
     print(f"    [attrib] Correct attribution: {correct} "
           f"(ground truth: {ground_truth_attacker_pid})")
@@ -302,9 +307,10 @@ def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker
         "correct_attribution": correct,
         "killed_pid": killed_pid,
         "ground_truth_pid": ground_truth_attacker_pid,
-        "kill_method": kill_method,
+        "kill_method": "SIGKILL",
         "kill_elapsed_s": round(attribution_latency, 4),
         "enum_method": candidates[0]["method"] if candidates else "none",
+        "baseline_power_w": baseline_power_w,
     }
 
 
@@ -551,6 +557,7 @@ def run_blinded_attribution_experiment(
         prev_current_a = 0.0
         prev_time = global_start
         cuda_proc = None
+        baseline_power_w = None
         attacker_pid = None
         attribution_result = None
 
@@ -659,6 +666,7 @@ def run_blinded_attribution_experiment(
                         assessor=assessor,
                         known_legit_pids=known_legit_pids,
                         ground_truth_attacker_pid=attacker_pid,
+                        baseline_power_w=baseline_power_w,
                     )
                     attribution_result["trial"] = trial_idx
                     attribution_result["phase"] = p_name
@@ -680,6 +688,8 @@ def run_blinded_attribution_experiment(
                 mean_lat = np.mean([r["avg_victim_latency_ms"] for r in phase_records])
                 print(f"    Phase '{p_name}': power={mean_pow:.2f}W, "
                       f"avg_victim_lat={mean_lat:.2f}ms")
+                if p_name == "multi_baseline":
+                    baseline_power_w = float(mean_pow)
 
         for r in runners:
             r.stop()
