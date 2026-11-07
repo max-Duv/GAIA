@@ -155,30 +155,31 @@ def enumerate_gpu_processes(exclude_pids=None):
     return list(discovered.values())
 
 
-def measure_power_stable(assessor, duration=1.0, interval=0.05):
-    """Collect power readings over a short window and return the mean."""
+def measure_power_stats(assessor, duration=1.0, interval=0.05):
+    """Collect power readings and return (mean, variance, readings)."""
     readings = []
     start = time.time()
     while time.time() - start < duration:
         hw = assessor.get_hardware_telemetry()
         readings.append(hw["power_w"])
         time.sleep(interval)
-    return float(np.mean(readings)) if readings else 0.0
+    if not readings:
+        return 0.0, 0.0, []
+    return float(np.mean(readings)), float(np.var(readings)), readings
 
 
 def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker_pid,
-                               measure_duration=1.5):
+                               measure_duration=2.0):
     """Blinded adversary attribution via sequential suspension.
 
-    For each candidate GPU process (excluding our own PID and the Python
-    interpreter parent), pause it with SIGSTOP, measure power drop, then
-    resume with SIGCONT.  The process whose suspension causes the largest
-    power drop is identified as the adversary and terminated.
+    Uses a composite score combining power-drop magnitude with power-variance
+    reduction. Modulated attackers create distinctive power oscillations that
+    vanish when suspended, even if their mean power draw is modest.
+
+    Score = normalized_power_drop + normalized_variance_drop
 
     The ground_truth_attacker_pid is ONLY used for accuracy scoring after
     the fact — it is never consulted during attribution.
-
-    Returns dict with attribution results.
     """
     attribution_start = time.time()
 
@@ -206,35 +207,53 @@ def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker
         suspect = candidates[0]
         print(f"    [attrib] Single candidate PID {suspect['pid']} — terminating directly")
     else:
-        # Sequential suspension: pause each, measure power drop, resume
-        pre_power = measure_power_stable(assessor, duration=measure_duration)
-        print(f"    [attrib] Pre-suspension baseline power: {pre_power:.2f} W")
+        pre_mean, pre_var, _ = measure_power_stats(assessor, duration=measure_duration)
+        print(f"    [attrib] Pre-suspension: mean={pre_mean:.2f} W, var={pre_var:.2f}")
 
-        drops = []
+        power_drops = []
+        var_drops = []
         for cand in candidates:
             pid = cand["pid"]
             try:
                 os.kill(pid, signal.SIGSTOP)
-                time.sleep(0.3)
-                suspended_power = measure_power_stable(assessor, duration=measure_duration)
-                drop = pre_power - suspended_power
-                drops.append(drop)
-                print(f"      PID {pid}: suspended power {suspended_power:.2f} W "
-                      f"(drop {drop:+.2f} W)")
+                time.sleep(0.5)
+                sus_mean, sus_var, _ = measure_power_stats(
+                    assessor, duration=measure_duration)
+                p_drop = pre_mean - sus_mean
+                v_drop = pre_var - sus_var
+                power_drops.append(p_drop)
+                var_drops.append(v_drop)
+                print(f"      PID {pid}: mean={sus_mean:.2f}W (Δ{p_drop:+.2f}W) "
+                      f"var={sus_var:.2f} (Δvar{v_drop:+.2f})")
             except (ProcessLookupError, PermissionError) as e:
                 print(f"      PID {pid}: could not suspend ({e})")
-                drops.append(-999.0)
+                power_drops.append(-999.0)
+                var_drops.append(-999.0)
             finally:
                 try:
                     os.kill(pid, signal.SIGCONT)
-                    time.sleep(0.2)
+                    time.sleep(0.3)
                 except (ProcessLookupError, PermissionError):
                     pass
 
-        max_idx = int(np.argmax(drops))
+        p_arr = np.array(power_drops, dtype=float)
+        v_arr = np.array(var_drops, dtype=float)
+
+        p_range = max(p_arr.max() - p_arr.min(), 1e-6)
+        v_range = max(v_arr.max() - v_arr.min(), 1e-6)
+        p_norm = (p_arr - p_arr.min()) / p_range
+        v_norm = (v_arr - v_arr.min()) / v_range
+
+        composite = p_norm + v_norm
+
+        max_idx = int(np.argmax(composite))
         suspect = candidates[max_idx]
-        print(f"    [attrib] Largest power drop: PID {suspect['pid']} "
-              f"({drops[max_idx]:+.2f} W)")
+        print(f"    [attrib] Composite scores: "
+              + ", ".join(f"PID {c['pid']}={composite[i]:.3f}"
+                          for i, c in enumerate(candidates)))
+        print(f"    [attrib] Selected PID {suspect['pid']} "
+              f"(power Δ{power_drops[max_idx]:+.2f}W, "
+              f"var Δ{var_drops[max_idx]:+.2f})")
 
     # Terminate the suspect
     killed_pid = suspect["pid"]
