@@ -29,7 +29,7 @@ class PlatformAgnosticAnomalyDetector:
     - Multi-feature Principal Component Analysis (PCA) for workload state separability.
     """
     def __init__(self, sampling_rate_hz=20.0, buffer_len=256, gpu_idx=0,
-                 power_anomaly_threshold_w=60.0):
+                 power_anomaly_threshold_w=60.0, external_telemetry=False):
         self.sampling_rate_hz = sampling_rate_hz
         self.buffer_len = buffer_len
         self.gpu_idx = gpu_idx
@@ -60,6 +60,8 @@ class PlatformAgnosticAnomalyDetector:
             self.platform_name = "NVIDIA Jetson Orin (sysfs INA3221)"
         elif self._has_pynvml:
             self.platform_name = "Discrete NVIDIA GPU (pynvml)"
+        elif external_telemetry:
+            self.platform_name = "External telemetry (buffers fed by caller)"
         else:
             raise RuntimeError(
                 "No hardware telemetry source detected. "

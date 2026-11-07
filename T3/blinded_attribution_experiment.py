@@ -494,6 +494,7 @@ def run_blinded_attribution_experiment(
         detector = PlatformAgnosticAnomalyDetector(
             sampling_rate_hz=4.0,
             power_anomaly_threshold_w=detection_threshold_w,
+            external_telemetry=True,
         )
 
         if use_subprocess_victims:
