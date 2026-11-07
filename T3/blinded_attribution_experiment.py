@@ -40,11 +40,8 @@ _EXE = ".exe" if sys.platform == "win32" else ""
 from gpu_fault_assessor_v2 import GPUFaultAssessorV2, CONDITION_LABELS, collect_platform_info
 from gpu_defense_filters_v2 import PlatformAgnosticAnomalyDetector
 
-try:
-    from realistic_victims import TrainingVictim, InferenceVictim, LegitimateHighPowerWorkload
-    _PYTORCH_VICTIMS = True
-except (ImportError, RuntimeError):
-    _PYTORCH_VICTIMS = False
+from realistic_victims import TrainingVictim, InferenceVictim, LegitimateHighPowerWorkload, _ensure_torch
+_PYTORCH_VICTIMS = _ensure_torch()
 
 
 BLINDED_CONDITION_LABELS = {
