@@ -155,33 +155,81 @@ def enumerate_gpu_processes(exclude_pids=None):
     return list(discovered.values())
 
 
-def measure_power_stats(assessor, duration=1.0, interval=0.05):
-    """Collect power readings and return (mean, variance, readings)."""
-    readings = []
-    start = time.time()
-    while time.time() - start < duration:
-        hw = assessor.get_hardware_telemetry()
-        readings.append(hw["power_w"])
+def sample_pmon_utilization(num_samples=5, interval=1.0, exclude_pids=None):
+    """Sample nvidia-smi pmon multiple times and return per-PID average SM%.
+
+    Returns dict: {pid: {"name": str, "sm_pct": float, "mem_pct": float, "samples": int}}
+    """
+    if exclude_pids is None:
+        exclude_pids = set()
+    pid_data = {}
+
+    for _ in range(num_samples):
+        try:
+            res = subprocess.run(
+                ["nvidia-smi", "pmon", "-c", "1", "-s", "u"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=5,
+            )
+            if res.returncode == 0:
+                for line in res.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if line.startswith("#") or not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        try:
+                            pid = int(parts[1])
+                            if pid <= 0 or pid in exclude_pids:
+                                continue
+                            sm = parts[3] if len(parts) > 3 else "-"
+                            mem = parts[4] if len(parts) > 4 else "-"
+                            name = parts[-1] if len(parts) >= 8 else "unknown"
+                            sm_val = int(sm) if sm != "-" else 0
+                            mem_val = int(mem) if mem != "-" else 0
+
+                            if pid not in pid_data:
+                                pid_data[pid] = {"name": name, "sm_vals": [],
+                                                 "mem_vals": [], "samples": 0}
+                            pid_data[pid]["sm_vals"].append(sm_val)
+                            pid_data[pid]["mem_vals"].append(mem_val)
+                            pid_data[pid]["samples"] += 1
+                        except ValueError:
+                            continue
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
         time.sleep(interval)
-    if not readings:
-        return 0.0, 0.0, []
-    return float(np.mean(readings)), float(np.var(readings)), readings
+
+    result = {}
+    for pid, d in pid_data.items():
+        result[pid] = {
+            "name": d["name"],
+            "sm_pct": float(np.mean(d["sm_vals"])) if d["sm_vals"] else 0.0,
+            "mem_pct": float(np.mean(d["mem_vals"])) if d["mem_vals"] else 0.0,
+            "samples": d["samples"],
+        }
+    return result
 
 
 def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker_pid,
                                measure_duration=2.0):
-    """Blinded adversary attribution via sequential suspension.
+    """Blinded adversary attribution via GPU utilization profiling.
 
-    Uses a composite score combining power-drop magnitude with power-variance
-    reduction. Modulated attackers create distinctive power oscillations that
-    vanish when suspended, even if their mean power draw is modest.
+    Samples per-process GPU SM utilization via nvidia-smi pmon over several
+    seconds. The process with the highest GPU compute utilization that is
+    not a known system desktop process is identified as the adversary.
 
-    Score = normalized_power_drop + normalized_variance_drop
+    SIGSTOP-based attribution fails on GPUs because GPU kernels persist
+    beyond process suspension. Per-process utilization from the GPU driver
+    is the reliable signal.
 
     The ground_truth_attacker_pid is ONLY used for accuracy scoring after
     the fact — it is never consulted during attribution.
     """
     attribution_start = time.time()
+
+    SYSTEM_PROCESS_NAMES = {"Xorg", "gnome-shell", "gdm", "Xwayland",
+                            "kwin_wayland", "sddm", "lightdm", "compiz"}
 
     candidates = enumerate_gpu_processes(exclude_pids=known_legit_pids)
     enum_time = time.time() - attribution_start
@@ -207,53 +255,34 @@ def blinded_attribute_and_kill(assessor, known_legit_pids, ground_truth_attacker
         suspect = candidates[0]
         print(f"    [attrib] Single candidate PID {suspect['pid']} — terminating directly")
     else:
-        pre_mean, pre_var, _ = measure_power_stats(assessor, duration=measure_duration)
-        print(f"    [attrib] Pre-suspension: mean={pre_mean:.2f} W, var={pre_var:.2f}")
+        print(f"    [attrib] Sampling GPU utilization (5 × 1s)...")
+        util_data = sample_pmon_utilization(
+            num_samples=5, interval=1.0, exclude_pids=known_legit_pids)
 
-        power_drops = []
-        var_drops = []
+        scores = []
         for cand in candidates:
             pid = cand["pid"]
-            try:
-                os.kill(pid, signal.SIGSTOP)
-                time.sleep(0.5)
-                sus_mean, sus_var, _ = measure_power_stats(
-                    assessor, duration=measure_duration)
-                p_drop = pre_mean - sus_mean
-                v_drop = pre_var - sus_var
-                power_drops.append(p_drop)
-                var_drops.append(v_drop)
-                print(f"      PID {pid}: mean={sus_mean:.2f}W (Δ{p_drop:+.2f}W) "
-                      f"var={sus_var:.2f} (Δvar{v_drop:+.2f})")
-            except (ProcessLookupError, PermissionError) as e:
-                print(f"      PID {pid}: could not suspend ({e})")
-                power_drops.append(-999.0)
-                var_drops.append(-999.0)
-            finally:
-                try:
-                    os.kill(pid, signal.SIGCONT)
-                    time.sleep(0.3)
-                except (ProcessLookupError, PermissionError):
-                    pass
+            is_system = cand["name"] in SYSTEM_PROCESS_NAMES
+            if pid in util_data:
+                u = util_data[pid]
+                sm = u["sm_pct"]
+                mem = u["mem_pct"]
+                score = sm + 0.5 * mem
+                if is_system:
+                    score *= 0.01
+                print(f"      PID {pid:>7d} ({cand['name']:<16s}): "
+                      f"SM={sm:5.1f}%  Mem={mem:5.1f}%  "
+                      f"score={score:.1f}{' [system]' if is_system else ''}")
+            else:
+                sm, mem, score = 0.0, 0.0, 0.0
+                print(f"      PID {pid:>7d} ({cand['name']:<16s}): "
+                      f"no pmon data, score=0")
+            scores.append(score)
 
-        p_arr = np.array(power_drops, dtype=float)
-        v_arr = np.array(var_drops, dtype=float)
-
-        p_range = max(p_arr.max() - p_arr.min(), 1e-6)
-        v_range = max(v_arr.max() - v_arr.min(), 1e-6)
-        p_norm = (p_arr - p_arr.min()) / p_range
-        v_norm = (v_arr - v_arr.min()) / v_range
-
-        composite = p_norm + v_norm
-
-        max_idx = int(np.argmax(composite))
+        max_idx = int(np.argmax(scores))
         suspect = candidates[max_idx]
-        print(f"    [attrib] Composite scores: "
-              + ", ".join(f"PID {c['pid']}={composite[i]:.3f}"
-                          for i, c in enumerate(candidates)))
-        print(f"    [attrib] Selected PID {suspect['pid']} "
-              f"(power Δ{power_drops[max_idx]:+.2f}W, "
-              f"var Δ{var_drops[max_idx]:+.2f})")
+        print(f"    [attrib] Highest scorer: PID {suspect['pid']} "
+              f"(score={scores[max_idx]:.1f})")
 
     # Terminate the suspect
     killed_pid = suspect["pid"]
