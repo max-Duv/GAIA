@@ -17,16 +17,24 @@ import sys
 import argparse
 import numpy as np
 import pandas as pd
-from scipy.stats import ttest_rel
+from scipy.stats import ttest_rel, shapiro, wilcoxon, t as t_dist
 from scipy import signal
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                             f1_score, roc_auc_score, average_precision_score)
+from statsmodels.stats.multitest import multipletests
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "T1"))
 from gpu_fault_assessor_v2 import CONDITION_LABELS
 
+HARMFUL_INTERFERENCE_PHASES = {
+    'victim_sustained_stress', 'victim_cache_only', 'victim_compute_only',
+    'victim_pulsed_stress', 'victim_temp_sync_stress', 'victim_occupancy_stress',
+    'temp_sync_randomized_delay', 'thermal_spike_hold', 'thermal_spike_release',
+    'clock_default_stress', 'clock_fixed_stress',
+}
 
 
 def load_csv(results_dir, filename):
@@ -40,11 +48,102 @@ def load_csv(results_dir, filename):
 
 
 def compute_cohens_d(x, y):
+    """Between-group Cohen's d using pooled SD."""
     nx, ny = len(x), len(y)
     pooled_std = np.sqrt(((nx - 1) * np.std(x, ddof=1)**2 + (ny - 1) * np.std(y, ddof=1)**2) / (nx + ny - 2))
     if pooled_std == 0:
         return 0.0
     return (np.mean(x) - np.mean(y)) / pooled_std
+
+
+def compute_cohens_dz(x, y):
+    """Paired Cohen's d_z = mean(diff) / std(diff)."""
+    diff = np.array(x) - np.array(y)
+    sd = np.std(diff, ddof=1)
+    if sd == 0:
+        return 0.0
+    return np.mean(diff) / sd
+
+
+def compute_ci_95(values):
+    """95% CI using t-distribution: mean +/- t_crit * SE."""
+    n = len(values)
+    if n < 2:
+        return np.mean(values), 0.0, np.mean(values), np.mean(values)
+    mean = np.mean(values)
+    se = np.std(values, ddof=1) / np.sqrt(n)
+    t_crit = t_dist.ppf(0.975, df=n - 1)
+    margin = t_crit * se
+    return mean, margin, mean - margin, mean + margin
+
+
+def fmt_ci(values):
+    """Format as 'mean [lo, hi]' with 95% CI."""
+    mean, margin, lo, hi = compute_ci_95(values)
+    return f"{mean:.2f} [{lo:.2f}, {hi:.2f}]"
+
+
+def paired_test_battery(x, y, label_a, label_b):
+    """Run paired t-test, Shapiro-Wilk on diffs, Wilcoxon, and Cohen's d_z.
+    Returns a dict of results and a list of formatted report lines."""
+    x, y = np.asarray(x), np.asarray(y)
+    diff = x - y
+    n = len(diff)
+    results = {'label_a': label_a, 'label_b': label_b, 'n': n}
+    lines = []
+
+    if n < 2:
+        lines.append(f"  {label_a} vs {label_b}: n={n}, insufficient for testing")
+        results['p_ttest'] = np.nan
+        return results, lines
+
+    t_stat, p_ttest = ttest_rel(x, y)
+    results['t_stat'] = t_stat
+    results['p_ttest'] = p_ttest
+
+    dz = compute_cohens_dz(x, y)
+    results['cohens_dz'] = dz
+
+    mean_diff, margin, ci_lo, ci_hi = compute_ci_95(diff)
+    results['mean_diff'] = mean_diff
+    results['ci_lo'] = ci_lo
+    results['ci_hi'] = ci_hi
+
+    if n >= 3:
+        sw_stat, sw_p = shapiro(diff)
+        results['shapiro_W'] = sw_stat
+        results['shapiro_p'] = sw_p
+        normality_ok = sw_p >= 0.05
+    else:
+        results['shapiro_W'] = np.nan
+        results['shapiro_p'] = np.nan
+        normality_ok = True
+
+    if n >= 6:
+        try:
+            w_stat, w_p = wilcoxon(diff)
+            results['wilcoxon_W'] = w_stat
+            results['wilcoxon_p'] = w_p
+        except ValueError:
+            results['wilcoxon_W'] = np.nan
+            results['wilcoxon_p'] = np.nan
+    else:
+        results['wilcoxon_W'] = np.nan
+        results['wilcoxon_p'] = np.nan
+
+    sig = "***" if p_ttest < 0.001 else "**" if p_ttest < 0.01 else "*" if p_ttest < 0.05 else "ns"
+    lines.append(f"  {label_a} vs {label_b}:")
+    lines.append(f"    Paired t: t={t_stat:.4f}, p={p_ttest:.6f} {sig}")
+    lines.append(f"    Mean diff: {mean_diff:.3f} ms, 95% CI [{ci_lo:.3f}, {ci_hi:.3f}]")
+    lines.append(f"    Cohen's d_z={dz:.3f} (paired)")
+    if not np.isnan(results.get('shapiro_p', np.nan)):
+        norm_str = "OK" if normality_ok else "VIOLATED"
+        lines.append(f"    Shapiro-Wilk: W={results['shapiro_W']:.4f}, p={results['shapiro_p']:.4f} ({norm_str})")
+    if not np.isnan(results.get('wilcoxon_p', np.nan)):
+        w_sig = "***" if results['wilcoxon_p'] < 0.001 else "**" if results['wilcoxon_p'] < 0.01 else "*" if results['wilcoxon_p'] < 0.05 else "ns"
+        lines.append(f"    Wilcoxon signed-rank: W={results['wilcoxon_W']:.1f}, p={results['wilcoxon_p']:.6f} {w_sig}")
+
+    return results, lines
 
 
 # Figure rendering is separated from statistical reports for independent review.
@@ -75,22 +174,22 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         all_phases = [p for p in t1_df['phase'].unique() if not p.startswith('sweep_')]
         core_phases = [p for p in all_phases if p in t1_df['phase'].values]
 
-        lines.append(f"\n{'Phase':<32}{'Latency(ms)':<18}{'Power(W)':<16}{'Min V(V)':<12}{'Cap Rate%':<10}")
-        lines.append("-" * 88)
+        lines.append(f"\n{'Phase':<32}{'Latency 95%CI (ms)':<26}{'Power 95%CI (W)':<24}{'Min V(V)':<12}{'Cap%':<8}")
+        lines.append("-" * 102)
 
         for pn in core_phases:
             sub = t1_df[t1_df['phase'] == pn]
             if sub.empty:
                 continue
-            trial_lat = sub.groupby('trial')['victim_total_latency_ms'].mean()
-            trial_pow = sub.groupby('trial')['power_w'].mean()
+            trial_lat = sub.groupby('trial')['victim_total_latency_ms'].mean().values
+            trial_pow = sub.groupby('trial')['power_w'].mean().values
             min_v = sub['voltage_v'].min()
             cap_count = ((sub['sw_power_cap'] == 1) | (sub['hw_slowdown'] == 1)).sum()
             cap_rate = cap_count / len(sub) * 100
 
-            lat_str = f"{trial_lat.mean():.2f} +/- {trial_lat.std():.2f}"
-            pow_str = f"{trial_pow.mean():.2f} +/- {trial_pow.std():.2f}"
-            lines.append(f"{pn:<32}{lat_str:<18}{pow_str:<16}{min_v:<12.5f}{cap_rate:<10.1f}")
+            lat_str = fmt_ci(trial_lat)
+            pow_str = fmt_ci(trial_pow)
+            lines.append(f"{pn:<32}{lat_str:<26}{pow_str:<24}{min_v:<12.5f}{cap_rate:<8.1f}")
 
         if 'sm_clock_mhz' in t1_df.columns:
             lines.append("\nClock Frequency by Phase:")
@@ -146,18 +245,52 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
                 trial_means[pn] = vals
 
         if len(trial_means) >= 2:
-            lines.append("\nPaired t-tests (per-trial mean latency):")
+            lines.append("\nPaired statistical tests (per-trial mean latency):")
+            lines.append("  (Holm-corrected p-values; paired Cohen's d_z; Wilcoxon robustness check)")
             phase_list = list(trial_means.keys())
+            all_test_results = []
+            all_test_lines = []
             for i in range(len(phase_list)):
                 for j in range(i+1, len(phase_list)):
                     a, b = phase_list[i], phase_list[j]
                     va, vb = trial_means[a], trial_means[b]
                     if len(va) == len(vb) and len(va) >= 2:
-                        t_stat, p_val = ttest_rel(va, vb)
-                        d = compute_cohens_d(va, vb)
-                        sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "ns"
-                        lines.append(f"  {a} vs {b}:")
-                        lines.append(f"    t={t_stat:.4f}, p={p_val:.6f} {sig}, Cohen's d={d:.3f}")
+                        res, test_lines = paired_test_battery(va, vb, a, b)
+                        all_test_results.append(res)
+                        all_test_lines.append(test_lines)
+
+            if all_test_results:
+                raw_pvals = [r['p_ttest'] for r in all_test_results]
+                valid_mask = ~np.isnan(raw_pvals)
+                if valid_mask.sum() > 0:
+                    valid_pvals = np.array(raw_pvals)[valid_mask]
+                    _, corrected, _, _ = multipletests(valid_pvals, method='holm')
+                    corr_idx = 0
+                    for k, res in enumerate(all_test_results):
+                        if valid_mask[k]:
+                            res['p_holm'] = corrected[corr_idx]
+                            corr_idx += 1
+                        else:
+                            res['p_holm'] = np.nan
+
+                for k, (res, test_lines) in enumerate(zip(all_test_results, all_test_lines)):
+                    lines.extend(test_lines)
+                    p_holm = res.get('p_holm', np.nan)
+                    if not np.isnan(p_holm):
+                        holm_sig = "***" if p_holm < 0.001 else "**" if p_holm < 0.01 else "*" if p_holm < 0.05 else "ns"
+                        lines.append(f"    Holm-adjusted p: {p_holm:.6f} {holm_sig}")
+
+                lines.append("\n  Supplementary Table: All Pairwise Comparisons")
+                lines.append(f"  {'Comparison':<50s} {'n':>3s} {'t':>8s} {'p_raw':>10s} {'p_holm':>10s} {'d_z':>7s} {'Wilcoxon_p':>11s}")
+                lines.append("  " + "-" * 103)
+                for res in all_test_results:
+                    comp = f"{res['label_a']} vs {res['label_b']}"
+                    t_str = f"{res.get('t_stat', np.nan):.4f}" if not np.isnan(res.get('t_stat', np.nan)) else "N/A"
+                    p_raw = f"{res.get('p_ttest', np.nan):.6f}" if not np.isnan(res.get('p_ttest', np.nan)) else "N/A"
+                    p_holm = f"{res.get('p_holm', np.nan):.6f}" if not np.isnan(res.get('p_holm', np.nan)) else "N/A"
+                    dz = f"{res.get('cohens_dz', np.nan):.3f}" if not np.isnan(res.get('cohens_dz', np.nan)) else "N/A"
+                    w_p = f"{res.get('wilcoxon_p', np.nan):.6f}" if not np.isnan(res.get('wilcoxon_p', np.nan)) else "N/A"
+                    lines.append(f"  {comp:<50s} {res['n']:>3d} {t_str:>8s} {p_raw:>10s} {p_holm:>10s} {dz:>7s} {w_p:>11s}")
 
         lines.append("\nLatency Percentiles:")
         for pn in core_phases:
@@ -207,6 +340,35 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         lines.append(f"\nWindowed samples: {len(labels)} ({n_benign} benign, {n_attack} attack)")
         lines.append(f"Window size: {window_size} telemetry samples")
 
+        # --- Build 8-feature windows (superset of the 4-feature set) ---
+        features_8, phase_ids = [], []
+        has_expanded = all(c in t1_df.columns for c in
+                          ['di_dt_amps_per_sec', 'sm_clock_mhz', 'gpu_temp_c', 'gpu_util_pct'])
+        for trial in sorted(t1_df['trial'].unique()):
+            for phase in t1_df['phase'].unique():
+                seg = t1_df[(t1_df['trial'] == trial) & (t1_df['phase'] == phase)]
+                if len(seg) < window_size:
+                    continue
+                for i in range(0, len(seg) - window_size + 1, window_size):
+                    sub = seg.iloc[i:i+window_size]
+                    if has_expanded:
+                        features_8.append([
+                            sub['power_w'].mean(), sub['power_w'].std(),
+                            sub['voltage_v'].min(),
+                            sub['voltage_v'].max() - sub['voltage_v'].min(),
+                            sub['di_dt_amps_per_sec'].abs().mean(),
+                            sub['sm_clock_mhz'].mean(),
+                            sub['gpu_temp_c'].mean(),
+                            sub['gpu_util_pct'].fillna(0).mean(),
+                        ])
+                    phase_ids.append(phase)
+        features_8 = np.array(features_8) if features_8 else np.empty((0, 8))
+        phase_ids = np.array(phase_ids)
+
+        # --- Also build harmful-interference labels ---
+        hi_labels = np.array([1 if phase_ids[i] in HARMFUL_INTERFERENCE_PHASES else 0
+                              for i in range(len(phase_ids))])
+
         if len(features) > 4 and len(np.unique(labels)) == 2:
             scaler_full = StandardScaler()
             X_full = scaler_full.fit_transform(features)
@@ -218,38 +380,107 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
             lines.append(f"  PC2: {pca_full.explained_variance_ratio_[1]*100:.1f}%")
             lines.append(f"  Total (2 components): {pca_full.explained_variance_ratio_.sum()*100:.1f}%")
 
-            unique_trials = sorted(set(trial_ids))
-            y_true_lot, y_pred_lot = [], []
-            for held_out in unique_trials:
-                train_mask = trial_ids != held_out
-                test_mask = trial_ids == held_out
-                if labels[test_mask].size == 0 or labels[train_mask].size == 0:
-                    continue
-                if len(np.unique(labels[train_mask])) < 2:
+            def _run_loto_cv(feat_matrix, y_labels, trial_arr, model_name):
+                """LOTO-CV returning predictions and probabilities."""
+                unique_trials = sorted(set(trial_arr))
+                y_true, y_pred, y_prob = [], [], []
+                for held_out in unique_trials:
+                    train_mask = trial_arr != held_out
+                    test_mask = trial_arr == held_out
+                    if y_labels[test_mask].size == 0 or y_labels[train_mask].size == 0:
+                        continue
+                    if len(np.unique(y_labels[train_mask])) < 2:
+                        continue
+                    s = StandardScaler()
+                    X_train = s.fit_transform(feat_matrix[train_mask])
+                    X_test = s.transform(feat_matrix[test_mask])
+                    clf = LogisticRegression(max_iter=1000)
+                    clf.fit(X_train, y_labels[train_mask])
+                    y_true.extend(y_labels[test_mask].tolist())
+                    y_pred.extend(clf.predict(X_test).tolist())
+                    y_prob.extend(clf.predict_proba(X_test)[:, 1].tolist())
+                return np.array(y_true), np.array(y_pred), np.array(y_prob)
+
+            def _report_classifier(y_true, y_pred, y_prob, label, lines):
+                if len(y_true) == 0:
+                    return
+                acc = accuracy_score(y_true, y_pred)
+                prec = precision_score(y_true, y_pred, zero_division=0)
+                rec = recall_score(y_true, y_pred, zero_division=0)
+                f1 = f1_score(y_true, y_pred, zero_division=0)
+                fpr = ((y_true == 0) & (y_pred == 1)).sum() / max((y_true == 0).sum(), 1)
+                lines.append(f"\n  {label}:")
+                lines.append(f"    Accuracy:  {acc*100:.1f}%")
+                lines.append(f"    Precision: {prec*100:.1f}%")
+                lines.append(f"    Recall:    {rec*100:.1f}%")
+                lines.append(f"    F1-Score:  {f1*100:.1f}%")
+                lines.append(f"    FPR:       {fpr*100:.1f}%")
+                if len(np.unique(y_true)) == 2 and len(y_prob) == len(y_true):
+                    roc = roc_auc_score(y_true, y_prob)
+                    pr_auc = average_precision_score(y_true, y_prob)
+                    lines.append(f"    ROC-AUC:   {roc:.4f}")
+                    lines.append(f"    PR-AUC:    {pr_auc:.4f}")
+
+            # --- 4-feature classifier (power anomaly detection) ---
+            lines.append(f"\n--- Classifier Ablation: 4-feature vs 8-feature ---")
+            y_true_4, y_pred_4, y_prob_4 = _run_loto_cv(features, labels, trial_ids, "4-feat")
+            _report_classifier(y_true_4, y_pred_4, y_prob_4,
+                              "4-Feature LogReg (power anomaly, LOTO-CV)", lines)
+
+            # --- 8-feature classifier (power anomaly detection) ---
+            if has_expanded and len(features_8) == len(features):
+                y_true_8, y_pred_8, y_prob_8 = _run_loto_cv(features_8, labels, trial_ids, "8-feat")
+                _report_classifier(y_true_8, y_pred_8, y_prob_8,
+                                  "8-Feature LogReg (power anomaly, LOTO-CV)", lines)
+
+                improvement = (accuracy_score(y_true_8, y_pred_8) - accuracy_score(y_true_4, y_pred_4)) * 100
+                fpr_4 = ((y_true_4 == 0) & (y_pred_4 == 1)).sum() / max((y_true_4 == 0).sum(), 1)
+                fpr_8 = ((y_true_8 == 0) & (y_pred_8 == 1)).sum() / max((y_true_8 == 0).sum(), 1)
+                lines.append(f"\n  Ablation delta (8-feat minus 4-feat):")
+                lines.append(f"    Accuracy:  {improvement:+.1f} pp")
+                lines.append(f"    FPR:       {(fpr_8 - fpr_4)*100:+.1f} pp")
+
+            # --- Dual detection task: harmful co-tenant interference ---
+            if len(np.unique(hi_labels)) == 2:
+                lines.append(f"\n--- Detection Task 2: Harmful Co-Tenant Interference ---")
+                lines.append(f"  (Positive = attack WITH co-located victim being harmed)")
+                y_true_hi, y_pred_hi, y_prob_hi = _run_loto_cv(features, hi_labels, trial_ids, "HI-4feat")
+                _report_classifier(y_true_hi, y_pred_hi, y_prob_hi,
+                                  "4-Feature LogReg (harmful interference, LOTO-CV)", lines)
+                if has_expanded and len(features_8) == len(features):
+                    y_true_hi8, y_pred_hi8, y_prob_hi8 = _run_loto_cv(features_8, hi_labels, trial_ids, "HI-8feat")
+                    _report_classifier(y_true_hi8, y_pred_hi8, y_prob_hi8,
+                                      "8-Feature LogReg (harmful interference, LOTO-CV)", lines)
+
+            # --- Out-of-distribution: leave-one-WORKLOAD-out ---
+            lines.append(f"\n--- Out-of-Distribution Evaluation (leave-one-workload-out) ---")
+            unique_phases = sorted(set(phase_ids))
+            for held_out_phase in unique_phases:
+                train_mask = phase_ids != held_out_phase
+                test_mask = phase_ids == held_out_phase
+                y_train, y_test = labels[train_mask], labels[test_mask]
+                if len(y_test) == 0 or len(np.unique(y_train)) < 2:
                     continue
                 s = StandardScaler()
                 X_train = s.fit_transform(features[train_mask])
                 X_test = s.transform(features[test_mask])
                 clf = LogisticRegression(max_iter=1000)
-                clf.fit(X_train, labels[train_mask])
+                clf.fit(X_train, y_train)
                 preds = clf.predict(X_test)
-                y_true_lot.extend(labels[test_mask].tolist())
-                y_pred_lot.extend(preds.tolist())
-
-            if len(y_true_lot) > 0:
-                y_true_lot = np.array(y_true_lot)
-                y_pred_lot = np.array(y_pred_lot)
-                acc = accuracy_score(y_true_lot, y_pred_lot)
-                prec = precision_score(y_true_lot, y_pred_lot, zero_division=0)
-                rec = recall_score(y_true_lot, y_pred_lot, zero_division=0)
-                f1 = f1_score(y_true_lot, y_pred_lot, zero_division=0)
-
-                lines.append(f"\nLogistic Regression (leave-one-trial-out CV, scaler fit per fold):")
-                lines.append(f"  Trials held out: {len(unique_trials)}")
-                lines.append(f"  Accuracy:  {acc*100:.1f}%")
-                lines.append(f"  Precision: {prec*100:.1f}%")
-                lines.append(f"  Recall:    {rec*100:.1f}%")
-                lines.append(f"  F1-Score:  {f1*100:.1f}%")
+                probs = clf.predict_proba(X_test)[:, 1]
+                acc = accuracy_score(y_test, preds)
+                is_atk = CONDITION_LABELS.get(held_out_phase, {}).get("is_attack", False)
+                if is_atk:
+                    metric_val = recall_score(y_test, preds, zero_division=0)
+                    metric_name = "Recall"
+                else:
+                    fp = ((y_test == 0) & (preds == 1)).sum()
+                    tn = ((y_test == 0) & (preds == 0)).sum()
+                    metric_val = fp / max(fp + tn, 1)
+                    metric_name = "FPR"
+                lines.append(f"  Held out '{held_out_phase}': "
+                            f"n={len(y_test)}, Acc={acc*100:.1f}%, "
+                            f"{metric_name}={metric_val*100:.1f}%")
 
     # --- T2 Hard-Negative Evaluation (if legit workloads present) ---
     if t1_df is not None and 'category' in t1_df.columns:
@@ -415,6 +646,7 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
         for pn in t1_df['phase'].unique():
             trial_psds = []
             trial_freqs = None
+            trial_fs_values = []
             for trial in sorted(t1_df['trial'].unique()):
                 seg = t1_df[(t1_df['trial'] == trial) & (t1_df['phase'] == pn)]
                 p_vals = seg['power_w'].values
@@ -423,6 +655,7 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
                 ts = seg['timestamp'].values
                 dt_mean = np.mean(np.diff(ts))
                 fs = 1.0 / dt_mean if dt_mean > 0 else 4.0
+                trial_fs_values.append(fs)
                 nperseg = min(len(p_vals), 256)
                 freqs, psd = signal.welch(p_vals, fs=fs, nperseg=nperseg)
                 if trial_freqs is None or len(freqs) == len(trial_freqs):
@@ -431,7 +664,7 @@ def generate_metrics_report(t1_df, t3_df, sweep_df, out_dir):
             if not trial_psds:
                 continue
             avg_psd = np.mean(trial_psds, axis=0)
-            fs_rep = 1.0 / dt_mean if dt_mean > 0 else 4.0
+            fs_rep = np.mean(trial_fs_values) if trial_fs_values else 4.0
             nyquist = fs_rep / 2.0
             peak_idx = np.argmax(avg_psd[1:]) + 1
             peak_freq = trial_freqs[peak_idx]
@@ -547,6 +780,10 @@ def generate_latex_tables(t1_df, t3_df, out_dir):
             'temp_sync_randomized_delay': 'Temp-Sync Randomized Delay',
             'thermal_spike_hold': 'Thermal Spike + Hold',
             'thermal_spike_release': 'Thermal Spike + Release',
+            'clock_default_alone': 'Default DVFS (Alone)',
+            'clock_default_stress': 'Default DVFS + Stress',
+            'clock_fixed_alone': 'Fixed Clock (Alone)',
+            'clock_fixed_stress': 'Fixed Clock + Stress',
         }
 
         rows = []
@@ -717,7 +954,10 @@ def generate_detector_breakdown(t1_df, out_dir):
     if window_size < 5:
         window_size = 5
 
-    features, labels, trial_ids, phase_ids = [], [], [], []
+    has_expanded = all(c in t1_df.columns for c in
+                      ['di_dt_amps_per_sec', 'sm_clock_mhz', 'gpu_temp_c', 'gpu_util_pct'])
+
+    features, features_8, labels, trial_ids, phase_ids = [], [], [], [], []
     for trial in sorted(t1_df['trial'].unique()):
         for phase in t1_df['phase'].unique():
             seg = t1_df[(t1_df['trial'] == trial) & (t1_df['phase'] == phase)]
@@ -736,11 +976,22 @@ def generate_detector_breakdown(t1_df, out_dir):
                     sub['voltage_v'].min(),
                     sub['voltage_v'].max() - sub['voltage_v'].min()
                 ])
+                if has_expanded:
+                    features_8.append([
+                        sub['power_w'].mean(), sub['power_w'].std(),
+                        sub['voltage_v'].min(),
+                        sub['voltage_v'].max() - sub['voltage_v'].min(),
+                        sub['di_dt_amps_per_sec'].abs().mean(),
+                        sub['sm_clock_mhz'].mean(),
+                        sub['gpu_temp_c'].mean(),
+                        sub['gpu_util_pct'].fillna(0).mean(),
+                    ])
                 labels.append(is_attack)
                 trial_ids.append(int(trial))
                 phase_ids.append(phase)
 
     features = np.array(features)
+    features_8 = np.array(features_8) if features_8 else np.empty((0, 8))
     labels = np.array(labels)
     trial_ids = np.array(trial_ids)
     phase_ids = np.array(phase_ids)
@@ -798,6 +1049,10 @@ def generate_detector_breakdown(t1_df, out_dir):
         'temp_sync_randomized_delay': 'Temp-Sync Randomized',
         'thermal_spike_hold': 'Thermal Spike + Hold',
         'thermal_spike_release': 'Thermal Spike + Release',
+        'clock_default_alone': 'Default DVFS (Alone)',
+        'clock_default_stress': 'Default DVFS + Stress',
+        'clock_fixed_alone': 'Fixed Clock (Alone)',
+        'clock_fixed_stress': 'Fixed Clock + Stress',
     }
 
     # --- Benign conditions: FPR ---
@@ -841,7 +1096,7 @@ def generate_detector_breakdown(t1_df, out_dir):
     fn_all = int(((y_true_all == 1) & (y_pred_all == 0)).sum())
     fp_all = int(((y_true_all == 0) & (y_pred_all == 1)).sum())
     tn_all = int(((y_true_all == 0) & (y_pred_all == 0)).sum())
-    lines.append(f"\nOverall Confusion Matrix:")
+    lines.append(f"\nOverall Confusion Matrix (4-feature):")
     lines.append(f"  TP={tp_all}  FP={fp_all}")
     lines.append(f"  FN={fn_all}  TN={tn_all}")
     acc = (tp_all + tn_all) / max(tp_all + fn_all + fp_all + tn_all, 1)
@@ -851,6 +1106,59 @@ def generate_detector_breakdown(t1_df, out_dir):
     fpr_overall = fp_all / max(fp_all + tn_all, 1)
     lines.append(f"  Accuracy={acc*100:.1f}%  Precision={prec*100:.1f}%  Recall={rec*100:.1f}%  F1={f1*100:.1f}%")
     lines.append(f"  Overall FPR={fpr_overall*100:.1f}%")
+
+    # --- 8-feature detector breakdown ---
+    if has_expanded and len(features_8) == len(features):
+        y_true_8, y_pred_8, phase_8 = [], [], []
+        for held_out in unique_trials:
+            train_mask = trial_ids != held_out
+            test_mask = trial_ids == held_out
+            if labels[test_mask].size == 0 or labels[train_mask].size == 0:
+                continue
+            if len(np.unique(labels[train_mask])) < 2:
+                continue
+            s = StandardScaler()
+            X_train = s.fit_transform(features_8[train_mask])
+            X_test = s.transform(features_8[test_mask])
+            clf = LogisticRegression(max_iter=1000)
+            clf.fit(X_train, labels[train_mask])
+            preds = clf.predict(X_test)
+            y_true_8.extend(labels[test_mask].tolist())
+            y_pred_8.extend(preds.tolist())
+            phase_8.extend(phase_ids[test_mask].tolist())
+
+        if y_true_8:
+            y_true_8 = np.array(y_true_8)
+            y_pred_8 = np.array(y_pred_8)
+            phase_8 = np.array(phase_8)
+            tp8 = int(((y_true_8 == 1) & (y_pred_8 == 1)).sum())
+            fn8 = int(((y_true_8 == 1) & (y_pred_8 == 0)).sum())
+            fp8 = int(((y_true_8 == 0) & (y_pred_8 == 1)).sum())
+            tn8 = int(((y_true_8 == 0) & (y_pred_8 == 0)).sum())
+            acc8 = (tp8 + tn8) / max(tp8 + fn8 + fp8 + tn8, 1)
+            prec8 = tp8 / max(tp8 + fp8, 1)
+            rec8 = tp8 / max(tp8 + fn8, 1)
+            f18 = 2 * prec8 * rec8 / max(prec8 + rec8, 1e-10)
+            fpr8 = fp8 / max(fp8 + tn8, 1)
+            lines.append(f"\nOverall Confusion Matrix (8-feature):")
+            lines.append(f"  TP={tp8}  FP={fp8}")
+            lines.append(f"  FN={fn8}  TN={tn8}")
+            lines.append(f"  Accuracy={acc8*100:.1f}%  Precision={prec8*100:.1f}%  Recall={rec8*100:.1f}%  F1={f18*100:.1f}%")
+            lines.append(f"  Overall FPR={fpr8*100:.1f}%")
+            lines.append(f"\n  Ablation: 8-feat vs 4-feat:")
+            lines.append(f"    Accuracy delta: {(acc8-acc)*100:+.1f} pp")
+            lines.append(f"    FPR delta:      {(fpr8-fpr_overall)*100:+.1f} pp")
+
+            lines.append(f"\n  8-Feature Per-Condition FPR (benign):")
+            for phase in benign_phases:
+                mask = phase_8 == phase
+                pred = y_pred_8[mask]
+                fp_c = int((pred == 1).sum())
+                tn_c = int((pred == 0).sum())
+                total = fp_c + tn_c
+                fpr_c = fp_c / max(total, 1)
+                name = phase_labels.get(phase, phase)
+                lines.append(f"    {name:<36s} {total:>7d} FP={fp_c:>3d} FPR={fpr_c:>7.1%}")
 
     summary = "\n".join(lines)
     txt_path = os.path.join(out_dir, "detector_breakdown.txt")

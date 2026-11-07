@@ -107,6 +107,74 @@ def significance_stars(p_value):
     return "ns"
 
 
+# ---------------------------------------------------------------------------
+# Devfreq clock-policy helpers (Thor: /sys/class/devfreq/gpu-gpc-0/)
+# ---------------------------------------------------------------------------
+
+def _read_devfreq(devfreq_path, attr):
+    with open(os.path.join(devfreq_path, attr)) as f:
+        return f.read().strip()
+
+
+def _write_devfreq(devfreq_path, attr, value):
+    with open(os.path.join(devfreq_path, attr), 'w') as f:
+        f.write(str(value))
+
+
+def devfreq_snapshot(devfreq_path):
+    snap = {}
+    for attr in ('min_freq', 'max_freq', 'cur_freq', 'governor'):
+        try:
+            snap[attr] = _read_devfreq(devfreq_path, attr)
+        except (IOError, OSError):
+            snap[attr] = None
+    return snap
+
+
+def devfreq_pick_fixed_freq(devfreq_path, target_hz=1575000000):
+    """Return a supported frequency closest to *target_hz*.
+    Falls back to the current max_freq if available_frequencies is absent."""
+    try:
+        avail = _read_devfreq(devfreq_path, 'available_frequencies')
+        freqs = sorted(int(f) for f in avail.split())
+    except (IOError, OSError, ValueError):
+        freqs = []
+    if not freqs:
+        try:
+            return int(_read_devfreq(devfreq_path, 'max_freq'))
+        except (IOError, OSError, ValueError):
+            return target_hz
+    if target_hz in freqs:
+        return target_hz
+    return min(freqs, key=lambda f: abs(f - target_hz))
+
+
+def devfreq_set_fixed(devfreq_path, freq_hz):
+    """Pin GPU clock by setting governor=userspace and both bounds."""
+    _write_devfreq(devfreq_path, 'governor', 'userspace')
+    _write_devfreq(devfreq_path, 'min_freq', freq_hz)
+    _write_devfreq(devfreq_path, 'max_freq', freq_hz)
+    actual = int(_read_devfreq(devfreq_path, 'cur_freq'))
+    print(f"    [clock] Fixed: requested={freq_hz}, cur_freq={actual}, "
+          f"governor={_read_devfreq(devfreq_path, 'governor')}")
+    return actual
+
+
+def devfreq_restore(devfreq_path, snapshot):
+    """Restore original devfreq settings from a snapshot dict."""
+    if snapshot.get('governor'):
+        _write_devfreq(devfreq_path, 'governor', snapshot['governor'])
+    if snapshot.get('min_freq'):
+        _write_devfreq(devfreq_path, 'min_freq', snapshot['min_freq'])
+    if snapshot.get('max_freq'):
+        _write_devfreq(devfreq_path, 'max_freq', snapshot['max_freq'])
+    restored = devfreq_snapshot(devfreq_path)
+    print(f"    [clock] Restored: governor={restored['governor']}, "
+          f"min={restored['min_freq']}, max={restored['max_freq']}, "
+          f"cur={restored['cur_freq']}")
+    return restored
+
+
 def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
                      trial_label, randomize_order=False, victim_fn=None,
                      temp_sync_log=None, experiment_meta=None):
@@ -147,6 +215,8 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
 
         print(f"  [{trial_label}] Phase '{p_name}' (Mode: {p_mode}, Freq: {p_freq} kHz, Duty: {p_duty})...")
         cuda_proc = None
+
+        clock_policy = p_info.get("clock_policy", "default")
 
         label_info = CONDITION_LABELS.get(p_name)
         if label_info is None:
@@ -309,11 +379,19 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
             sm_clk = hw.get("sm_clock_mhz", 0)
             gpu_temp = hw.get("gpu_temp_c", 0)
 
+            devfreq_cur = hw.get("devfreq_cur_freq_hz")
+            if devfreq_cur is None and assessor._devfreq_path:
+                try:
+                    devfreq_cur = int(_read_devfreq(assessor._devfreq_path, 'cur_freq'))
+                except (IOError, OSError, ValueError):
+                    devfreq_cur = None
+
             records.append({
                 "timestamp": round(t_curr - trial_start, 4),
                 "phase": p_name,
                 "is_attack": is_attack,
                 "category": label_info["category"],
+                "clock_policy": clock_policy,
                 "data_source": hw["provenance"],
                 "power_w": round(p_w, 3),
                 "voltage_v": round(v_meas, 5),
@@ -330,6 +408,7 @@ def run_single_trial(phases, cuda_binary, duration_per_phase, assessor,
                 "sw_power_cap": hw.get("sw_power_cap", 0),
                 "hw_slowdown": hw.get("hw_slowdown", 0),
                 "throttle_bitmask": hw.get("throttle_bitmask", 0),
+                "devfreq_cur_hz": devfreq_cur,
                 "temp_sync_trigger": temp_sync_trigger,
                 "stress_start_ts": round(stress_start_ts - trial_start, 4) if stress_start_ts else None,
             })
@@ -523,15 +602,131 @@ def run_controlled_3phase_experiment(
             json.dump(temp_sync_log, f, indent=2)
         print(f"[+] Temp-sync trace log saved to: {ts_path}")
 
+    # ------------------------------------------------------------------
+    # Clock-policy comparison block (separate from thermal-spike phases)
+    # 2x2 design: {default, fixed} x {victim alone, victim + stress}
+    # ------------------------------------------------------------------
+    devfreq_path = assessor._devfreq_path
+    if devfreq_path:
+        print("\n=====================================================================")
+        print("  CLOCK-POLICY COMPARISON (2x2 DVFS experiment)")
+        print("=====================================================================")
+
+        fixed_freq_hz = devfreq_pick_fixed_freq(devfreq_path)
+        orig_snap = devfreq_snapshot(devfreq_path)
+        print(f"[clock] Original state: governor={orig_snap['governor']}, "
+              f"min={orig_snap['min_freq']}, max={orig_snap['max_freq']}")
+        print(f"[clock] Selected fixed frequency: {fixed_freq_hz} Hz "
+              f"({fixed_freq_hz / 1e6:.0f} MHz)")
+
+        clock_phases_default = [
+            {"name": "clock_default_alone", "mode": None, "freq": 0, "duty": 0.0,
+             "clock_policy": "default"},
+            {"name": "clock_default_stress", "mode": "oversubscribe", "freq": 0.001, "duty": 1.0,
+             "clock_policy": "default"},
+        ]
+        clock_phases_fixed = [
+            {"name": "clock_fixed_alone", "mode": None, "freq": 0, "duty": 0.0,
+             "clock_policy": "fixed"},
+            {"name": "clock_fixed_stress", "mode": "oversubscribe", "freq": 0.001, "duty": 1.0,
+             "clock_policy": "fixed"},
+        ]
+
+        for cp in clock_phases_default + clock_phases_fixed:
+            per_phase_trial_means[cp["name"]] = []
+
+        for trial_idx in range(1, num_trials + 1):
+            print(f"\n{'='*60}")
+            print(f"  Clock-Policy Trial {trial_idx}/{num_trials}")
+            print(f"{'='*60}")
+
+            if trial_idx % 2 == 1:
+                block_order = [("default", clock_phases_default),
+                               ("fixed", clock_phases_fixed)]
+            else:
+                block_order = [("fixed", clock_phases_fixed),
+                               ("default", clock_phases_default)]
+
+            for policy_name, policy_phases in block_order:
+                if policy_name == "fixed":
+                    print(f"  [clock] Setting fixed frequency: {fixed_freq_hz} Hz")
+                    try:
+                        devfreq_set_fixed(devfreq_path, fixed_freq_hz)
+                    except (IOError, OSError) as e:
+                        print(f"  [clock] WARNING: failed to set fixed freq: {e}")
+                        continue
+                else:
+                    print(f"  [clock] Restoring default DVFS")
+                    try:
+                        devfreq_restore(devfreq_path, orig_snap)
+                    except (IOError, OSError) as e:
+                        print(f"  [clock] WARNING: failed to restore default: {e}")
+
+                try:
+                    records, phase_summaries = run_single_trial(
+                        policy_phases, cuda_binary, duration_per_phase, assessor,
+                        f"CLK-{policy_name}-T{trial_idx}",
+                        randomize_order=False,
+                        victim_fn=victim_fn,
+                        experiment_meta=experiment_meta,
+                    )
+                except Exception as e:
+                    print(f"  [clock] ERROR in {policy_name} block: {e}")
+                    records, phase_summaries = [], {}
+                finally:
+                    try:
+                        devfreq_restore(devfreq_path, orig_snap)
+                        verify = devfreq_snapshot(devfreq_path)
+                        if verify['governor'] != orig_snap['governor']:
+                            print(f"  [clock] WARNING: governor restore mismatch: "
+                                  f"{verify['governor']} != {orig_snap['governor']}")
+                    except (IOError, OSError) as e:
+                        print(f"  [clock] WARNING: restore failed in finally: {e}")
+
+                for r in records:
+                    r["trial"] = trial_idx
+                all_records.extend(records)
+
+                for p_name, stats in phase_summaries.items():
+                    per_phase_trial_means.setdefault(p_name, []).append(
+                        stats["mean_total_latency_ms"])
+                    row = {"trial": trial_idx, "phase": p_name}
+                    row.update(stats)
+                    all_trial_summaries.append(row)
+
+        try:
+            devfreq_restore(devfreq_path, orig_snap)
+        except (IOError, OSError):
+            pass
+
+        clock_csv = output_csv.replace(".csv", "_clock_policy.csv")
+        clock_records = [r for r in all_records if r.get("clock_policy") in ("default", "fixed")
+                         and r["phase"].startswith("clock_")]
+        if clock_records:
+            clock_meta = {
+                "fixed_freq_hz": fixed_freq_hz,
+                "original_governor": orig_snap['governor'],
+                "original_min_freq": orig_snap['min_freq'],
+                "original_max_freq": orig_snap['max_freq'],
+            }
+            meta_path = os.path.join(output_dir, "clock_policy_meta.json")
+            with open(meta_path, "w") as f:
+                json.dump(clock_meta, f, indent=2)
+            print(f"[+] Clock-policy metadata saved to: {meta_path}")
+    else:
+        print("\n[clock] No devfreq path found — skipping clock-policy comparison")
+
     if all_records:
         fieldnames = [
             "trial", "timestamp", "phase", "is_attack", "category",
+            "clock_policy",
             "data_source", "power_w", "voltage_v",
             "current_a", "di_dt_amps_per_sec", "victim_kernel_ms",
             "victim_total_latency_ms", "victim_launch_delay_ms",
             "victim_backend",
             "sm_clock_mhz", "gpu_temp_c", "gpu_util_pct", "mem_util_pct",
             "sw_power_cap", "hw_slowdown", "throttle_bitmask",
+            "devfreq_cur_hz",
             "temp_sync_trigger", "stress_start_ts", "stress_stop_ts"
         ]
         with open(output_csv, "w", newline="") as f:
@@ -555,10 +750,18 @@ def run_controlled_3phase_experiment(
     print(f"{'Phase':<26}{'Latency(ms)':<18}{'Std':<10}{'p50':<10}{'p95':<10}{'p99':<10}{'Power(W)':<12}{'Cap%':<8}")
     print("-" * 104)
 
+    all_phase_names = [p["name"] for p in phases]
+    clock_phase_names = ["clock_default_alone", "clock_default_stress",
+                         "clock_fixed_alone", "clock_fixed_stress"]
+    for cpn in clock_phase_names:
+        if cpn in per_phase_trial_means and per_phase_trial_means[cpn]:
+            all_phase_names.append(cpn)
+
     aggregate = {}
-    for p_info in phases:
-        p_name = p_info["name"]
+    for p_name in all_phase_names:
         trial_rows = [s for s in all_trial_summaries if s["phase"] == p_name]
+        if not trial_rows:
+            continue
 
         lat_means = [s["mean_total_latency_ms"] for s in trial_rows]
         lat_stds = [s["std_total_latency_ms"] for s in trial_rows]
@@ -623,6 +826,36 @@ def run_controlled_3phase_experiment(
         ratio = aggregate["victim_sustained_stress"]["power"] / max(aggregate["victim_pulsed_stress"]["power"], 0.01)
         matched = "YES" if 0.8 <= ratio <= 1.2 else "NO"
         print(f"  Ratio (sustained/pulsed): {ratio:.3f}  Power-matched: {matched}")
+
+    clock_conds = ["clock_default_alone", "clock_default_stress",
+                   "clock_fixed_alone", "clock_fixed_stress"]
+    has_clock = all(c in per_phase_trial_means and len(per_phase_trial_means[c]) >= 2
+                    for c in clock_conds)
+    if has_clock:
+        print("\n Clock-Policy Comparison (2x2 DVFS):")
+        da = np.array(per_phase_trial_means["clock_default_alone"])
+        db = np.array(per_phase_trial_means["clock_default_stress"])
+        fa = np.array(per_phase_trial_means["clock_fixed_alone"])
+        fb = np.array(per_phase_trial_means["clock_fixed_stress"])
+
+        default_effect = db - da
+        fixed_effect = fb - fa
+        print(f"  Default DVFS stress effect (B-A): {np.mean(default_effect):+.3f} ± {np.std(default_effect, ddof=1):.3f} ms")
+        print(f"  Fixed clock stress effect  (D-C): {np.mean(fixed_effect):+.3f} ± {np.std(fixed_effect, ddof=1):.3f} ms")
+
+        n = min(len(default_effect), len(fixed_effect))
+        if n >= 2:
+            t_int, p_int = ttest_rel(default_effect[:n], fixed_effect[:n])
+            print(f"  Interaction (default_effect vs fixed_effect): "
+                  f"t={t_int:>7.3f}, p={p_int:.6f} {significance_stars(p_int)}")
+        for label, x, y in [("B vs A (default)", db, da),
+                             ("D vs C (fixed)", fb, fa),
+                             ("A vs C (baselines)", da, fa),
+                             ("B vs D (stress)", db, fb)]:
+            n2 = min(len(x), len(y))
+            if n2 >= 2:
+                t_v, p_v = ttest_rel(x[:n2], y[:n2])
+                print(f"  {label:<28s}: t={t_v:>7.3f}, p={p_v:.6f} {significance_stars(p_v)}")
 
     print("=====================================================================\n")
 
