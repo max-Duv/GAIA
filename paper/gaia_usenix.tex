@@ -12,6 +12,8 @@
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 \usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
 
 \sisetup{detect-weight=true, detect-family=true}
 
@@ -1146,7 +1148,8 @@ Mimicry attacks are distinguished by the 8-feature classifier
 (0\% FPR on the matmul hard negative).
 
 \textbf{Monitoring.}
-A Prometheus exporter re-publishes sysfs metrics for Grafana;
+A Prometheus exporter re-publishes sysfs metrics for Grafana
+(Figure~\ref{fig:prometheus}, Appendix~\ref{app:prometheus});
 the same schema could back DCGM on discrete platforms.
 
 \textbf{Implications for operators.}
@@ -1376,6 +1379,11 @@ adversarial strategies.
   95\% Student-$t$ CIs; individual trials are shown as light points.}
 \label{fig:sweep}
 \end{figure*}
+
+\section{Prometheus Exporter Verification}
+\label{app:prometheus}
+
+\input{figures/fig_prometheus_metrics}
 
 \section{Open Science}
 \label{app:openscience}

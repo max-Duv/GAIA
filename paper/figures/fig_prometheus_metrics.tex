@@ -1,0 +1,37 @@
+\begin{figure}[t]
+\begin{lstlisting}[
+  basicstyle=\ttfamily\scriptsize,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  breaklines=true,
+  columns=fullflexible,
+  xleftmargin=2pt,
+  xrightmargin=2pt,
+  aboveskip=4pt,
+  belowskip=4pt,
+]
+$ curl -s http://localhost:9101/metrics | grep "^gaia_"
+gaia_gpu_power_watts 0.0
+gaia_gpu_voltage_volts{channel="VDD_GPU"} 19.752
+gaia_gpu_voltage_volts{channel="VDD_CPU_SOC_MSS"} 19.752
+gaia_gpu_voltage_volts{channel="VIN_SYS_5V0"} 5.072
+gaia_gpu_current_amps{channel="VDD_GPU"} -0.02
+gaia_gpu_current_amps{channel="VDD_CPU_SOC_MSS"} 0.24
+gaia_gpu_current_amps{channel="VIN_SYS_5V0"} 1.06
+gaia_gpu_clock_hz 1.575e+12
+gaia_gpu_temperature_celsius 39.031
+gaia_gpu_utilization_ratio 0.0
+gaia_gpu_current_slew_rate 0.0
+gaia_anomaly_detected 0.0
+gaia_telemetry_samples_total 1736.0
+gaia_exporter_info{platform="jetson_agx_thor",
+  sensor="ina3221",version="1.0.0"} 1.0
+\end{lstlisting}
+\caption{Live Prometheus metrics from the GAIA exporter on Jetson
+  AGX Thor (GPU idle).  The exporter re-publishes INA3221 power,
+  voltage, current (3 channels), devfreq clock, thermal zone
+  temperature, and anomaly-detection state at $\sim$32\,Hz via
+  a standard HTTP \texttt{/metrics} endpoint compatible with
+  Grafana and Prometheus.}
+\label{fig:prometheus}
+\end{figure}
