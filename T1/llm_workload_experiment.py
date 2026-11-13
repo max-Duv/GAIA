@@ -102,9 +102,6 @@ class LLMTrainingVictim:
         self.model.to(self.device)
         self.model.train()
 
-        if self.use_fp16:
-            self.model = self.model.half()
-
         self.optimizer = _torch.optim.AdamW(self.model.parameters(), lr=5e-5)
         self.scaler = _torch.amp.GradScaler("cuda") if self.use_fp16 else None
 
