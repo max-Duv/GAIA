@@ -34,8 +34,8 @@ nvcc -arch=sm_110 -O2 -o gpu_power_poc_v3 gpu_power_poc_v3.cu -lcuda -lcudart
 
 ### Run experiment (5 trials, ~8 min total)
 ```bash
-sudo python3 filler_kernel_experiment.py \
-    --trials 5 --phase-duration 15 \
+sudo python3 T2/filler_kernel_experiment.py \
+    --trials 5 --duration 15 \
     --output-dir results/filler_kernel/
 ```
 
@@ -66,20 +66,20 @@ scp T1/llm_workload_experiment.py \
 
 ### Run LLM training experiment
 ```bash
-sudo python3 llm_workload_experiment.py \
+sudo python3 T1/llm_workload_experiment.py \
     --victim-type training --model gpt2 \
     --batch-size 2 --seq-len 128 \
     --trials 5 --duration 15 \
-    --output-dir results/llm_training/
+    --out results/llm_training/llm_training.csv
 ```
 
 ### Run LLM inference experiment
 ```bash
-sudo python3 llm_workload_experiment.py \
+sudo python3 T1/llm_workload_experiment.py \
     --victim-type inference --model gpt2 \
     --batch-size 4 --seq-len 64 \
     --trials 5 --duration 15 \
-    --output-dir results/llm_inference/
+    --out results/llm_inference/llm_inference.csv
 ```
 
 ### If OOM

@@ -198,8 +198,11 @@ def run_experiment(args):
     victim_fn = assessor.run_victim_workload_iteration
     platform_info = collect_platform_info()
 
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(SCRIPT_DIR, f"results_filler_{ts}")
+    if args.output_dir:
+        out_dir = args.output_dir
+    else:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        out_dir = os.path.join(SCRIPT_DIR, f"results_filler_{ts}")
     os.makedirs(out_dir, exist_ok=True)
 
     with open(os.path.join(out_dir, "platform_info.json"), "w") as f:
@@ -318,6 +321,8 @@ if __name__ == "__main__":
                         help="Phase duration in seconds (default: 15)")
     parser.add_argument("--cooldown", type=float, default=5.0,
                         help="Cooldown between phases (default: 5)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output directory (default: auto-timestamped)")
     args = parser.parse_args()
 
     run_experiment(args)
