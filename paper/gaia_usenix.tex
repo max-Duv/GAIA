@@ -415,6 +415,13 @@ workload-dependent attack effectiveness:
 \item \textbf{CNN inference}: Forward-pass only on the same
   architecture with batched inputs, representing a serving workload
   with the lightest compute footprint.
+\item \textbf{LLM training and inference}: GPT-2 Small (124\,M
+  parameters) fine-tuning on synthetic data (batch size~2,
+  sequence length~128, mixed-precision) and autoregressive
+  inference (batch size~4, 32-token prompt, 64-token generation).
+  These workloads characterize the distinct power phases of
+  large-model training (forward/backward/optimizer) and
+  inference (attention-bound generation).
 \end{enumerate}
 
 \textbf{Latency metric.}  All latency figures report
@@ -446,12 +453,21 @@ threshold detector operates on raw power readings; the logistic
 regression classifier is evaluated via leave-one-trial-out
 cross-validation (LOTO-CV) with per-fold standardization.
 
+\textbf{Thrust~2b (LLM Workload Impact).}
+GPT-2 Small (124\,M parameters) is evaluated under training
+(batch~2, seq\_len~128, mixed-precision) and inference (batch~4,
+32-token prompt, 64-token generation) with and without the
+concurrent attacker, 5~trials per condition.
+
 \textbf{Thrust~3 (Mitigation).}
 Closed-loop mitigation uses a five-phase design: attack unmitigated,
 attack mitigated (clock cap), attack terminated (process kill),
 clamped baseline (no attack, clock capped), and recovery baseline.
 Five independent trials provide paired statistical comparisons.
 The experiment is run with all three victim workload types.
+A proactive filler-kernel defense is separately evaluated:
+5~trials across six conditions (victim alone, attacker, attacker
+with 25\%/50\% filler, filler only at 25\%/50\%).
 
 \subsection{Statistical Methods}
 \label{sec:stats}
@@ -691,6 +707,27 @@ per-condition power and latency deltas.
 \label{fig:contention}
 \end{figure*}
 
+\subsection{LLM Workload Impact}
+\label{sec:eval-llm}
+
+We evaluate GPT-2 Small (124\,M params) under training and inference
+(5~trials each; Table~\ref{tab:llm_workload},
+Appendix~\ref{app:llm_workload}).
+Training latency inflates by 85.1\% (102$\to$189\,ms), with
+throughput halved ($-$46\%, 2512$\to$1356\,tok/s).
+The optimizer phase absorbs most impact ($+$112\%), consistent with
+memory-bandwidth contention.
+Critically, training power \emph{decreases} by 11.5\,W
+(88.4$\to$77.0\,W)---the attacker's DVFS contention throttles the
+victim more than the attacker itself adds, confirming the
+contention mechanism from Section~\ref{sec:eval-contention}.
+Inference shows the inverse: power rises $+$3.1\,W (lower baseline
+leaves headroom), while latency inflates 78.1\%
+(401$\to$714\,ms, $-$44\% throughput).
+These asymmetric signatures mean a pure power-threshold detector
+would miss attacks on high-power workloads; multi-feature detection
+(Section~\ref{sec:detect-ml}) captures both cases.
+
 
 % ===================================================================
 \section{Detection Mechanisms}
@@ -926,16 +963,9 @@ separates the inherent DVFS penalty from the residual attack impact.
 \resizebox{\columnwidth}{!}{\input{../../GAIA/results_20261025_193034/figures/table_t3_results}}
 \end{table}
 
-\begin{figure*}[t]
-\centering
-\includegraphics[width=.9\textwidth]{fig4_t3_mitigation.pdf}
-\caption{Closed-loop mitigation (synthetic victim, 5 trials).
-  Top: aggregate power~(a) and latency~(b) per phase with 95\%
-  Student-$t$ CIs.  Bottom: single-trial timeline showing
-  power~(c) and victim latency~(d) with the detection flag at
-  4.28\,s.}
-\label{fig:t3}
-\end{figure*}
+Figure~\ref{fig:t3} (Appendix~\ref{app:mitigation_fig})
+visualizes the per-phase power and latency with the detection
+flag at 4.28\,s.
 
 \subsection{Graceful Termination}
 \label{sec:mit-kill}
@@ -1037,7 +1067,6 @@ recovery for legitimate victims).  Attribution latency averages
 (2\,s GPU-context teardown + 2\,s power sampling per candidate).
 The procedure kills all candidates during the elimination sweep,
 resulting in 2 innocent kills per trial.
-Figure~\ref{fig:attribution} summarizes the per-trial results.
 
 \begin{table}[t]
 \centering\small
@@ -1061,17 +1090,28 @@ Attack power shift & $-$6.9\,W (7\%) \\
 \end{tabular}
 \end{table}
 
-\begin{figure*}[t]
-\centering
-\includegraphics[width=.85\textwidth]{fig_blinded_attribution.pdf}
-\caption{Blinded attribution results (5 trials).
-  (a)~Mean power per phase: the attack \emph{reduces} power by
-  8.9\,W due to DVFS contention; the response phase shows reduced
-  power after all processes are killed.
-  (b)~Attribution accuracy: correct in all 5 trials.
-  (c)~Attribution latency per trial, consistent at 14.2\,s.}
-\label{fig:attribution}
-\end{figure*}
+Figure~\ref{fig:attribution}
+(Appendix~\ref{app:attribution}) visualizes the per-trial results.
+
+\subsection{Proactive Defense: Filler Kernels}
+\label{sec:mit-filler}
+
+Reactive mitigations engage after detection; we also evaluate a
+\emph{proactive} defense: a benign filler kernel occupying idle SMs
+to raise the power floor and dampen the attacker's marginal amplitude.
+The filler launches INT32 thread blocks at 25\% or 50\% SM occupancy
+(50\% duty cycle), tested across 5~trials and six conditions
+(Table~\ref{tab:filler_defense},
+Appendix~\ref{app:filler_defense}).
+Without filler, the attacker adds $+$44.4\,W (43.3$\to$87.8\,W).
+A 25\% filler reduces this to $+$27.9\,W (37\% reduction,
+$p{=}0.004$, Mann--Whitney~$U$); 50\% yields $+$30.0\,W (32\%).
+The 25\% filler is more effective because it preempts the lower
+portion of the attacker's power swing (baseline rises to 54.9\,W).
+Latency overhead is negligible ($+$0.01\,ms).
+The filler-only power cost (11.6--16.7\,W) is an ``insurance
+premium'' that complements the reactive pipeline without
+requiring process identification.
 
 
 % ===================================================================
@@ -1079,80 +1119,46 @@ Attack power shift & $-$6.9\,W (7\%) \\
 \label{sec:discussion}
 % ===================================================================
 
-\subsection{Limitations}
-\label{sec:limits}
-
 \textbf{Platform and scale.}
-The Jetson AGX Thor shares its SoC power domain across GPU/CPU/IO,
-unlike discrete GPUs with independent power planes and
-\texttt{nvidia-smi --power-limit}; devfreq mitigation is
-Jetson-specific.  However, the per-device attack surface transfers
-conservatively: discrete GPUs (A100: 400\,W, H100: 700\,W,
-B200: 1000\,W) have $3\text{--}8\times$ higher TDP, amplifying
-per-GPU power injection.  Synchronized adversarial kernels across
-8 GPUs would aggregate $+43$\,W to $+344$\,W at node level.
-Jetson's shared rail is a \emph{harder} case for the attacker
-(lower headroom) but provides ground-truth INA3221 power
-measurement typically unavailable on discrete systems.
-MPS and MIG partitioning, absent on Jetson, would reduce
-cache-contention effects but not power-domain manipulation (shared
-power delivery); evaluating this is future work.
+The Jetson AGX Thor shares its SoC power domain across GPU/CPU/IO;
+devfreq mitigation is Jetson-specific.  However, discrete GPUs
+(A100: 400\,W, H100: 700\,W, B200: 1000\,W) have
+$3\text{--}8\times$ higher TDP, amplifying per-GPU power injection.
+Jetson's shared rail is a harder case for the attacker (lower
+headroom) but provides ground-truth INA3221 measurements.
+MPS/MIG partitioning would reduce cache-contention effects but
+not power-domain manipulation (shared power delivery).
 
-\textbf{Detection pipeline.}
+\textbf{Detection and attribution.}
 The 8-feature classifier (FPR 11.1\%) could improve with
-instruction-mix and memory-bandwidth features.  The sliding-window
-EMA detector is intentionally simple; Kalman-filter predictive
-scoring is a natural extension.  The eight sysfs features
-(power, voltage, current slew, clock, temperature, utilization)
-exclude hardware performance counters requiring root-level
-profiling (\texttt{perf}/CUPTI), which conflicts with the
-unprivileged monitoring model; DCGM~\cite{dcgm2026} exposes richer
-counters on discrete platforms.
-LOTO-CV tests across-trial but not across-attack generalization;
-leave-one-attack-out CV is feasible from existing data.
-
-\textbf{Attribution cost.}
-Sequential elimination kills all candidates (2 innocent kills per
-trial).  Early-stopping and per-process utilization reporting
-(available on discrete GPUs with MPS) could reduce collateral
-damage.
+instruction-mix and memory-bandwidth features; the EMA detector is
+intentionally simple, with Kalman-filter scoring as a natural
+extension.  DCGM~\cite{dcgm2026} exposes richer counters on
+discrete platforms; our sysfs features exclude root-level profiling
+by design.
+Sequential elimination kills all candidates (2 innocent kills/trial);
+early-stopping could reduce collateral.
 
 \textbf{Adaptive attackers.}
-Sub-threshold modulation ($<\theta{=}60$\,W) reduces attack impact;
-our sweep shows even $+$16\,W at 468\,MHz produces
-$\sim$3$\sigma$ deviation, detectable via CUSUM.  Mimicry attacks
-matching legitimate power profiles are distinguished by the
-8-feature classifier (0\% FPR on the matmul hard negative).
-Slow ramps require longer windows; minimum detectable rate is
-bounded by sensor noise ($\sigma{\approx}0.5$\,W).
+Sub-threshold modulation ($<\theta{=}60$\,W) reduces impact, but
+even $+$16\,W at 468\,MHz produces $\sim$3$\sigma$ deviation.
+Mimicry attacks are distinguished by the 8-feature classifier
+(0\% FPR on the matmul hard negative).
 
-\textbf{Monitoring infrastructure.}
-The detection loop polls sysfs at $\sim$3.9\,ms/sample; a companion
-Prometheus exporter re-publishes metrics for Grafana integration.
-DCGM is unsupported on Jetson; the exporter wraps sysfs, but the
-same schema could back DCGM counters on discrete platforms.
-Detection algorithms are transport-agnostic.
+\textbf{Monitoring.}
+A Prometheus exporter re-publishes sysfs metrics for Grafana;
+the same schema could back DCGM on discrete platforms.
 
-\subsection{Implications for Data Center Security}
-\label{sec:implications}
-
-Our results have four implications for operators.
-(1)~\textbf{Power monitoring is necessary but insufficient:}
-it detects anomalies with zero false positives on low-power
-workloads, but cannot distinguish adversarial from benign heavy
-computation without utilization-counters and process-level attribution.
-(2)~\textbf{Software power caps do not neutralize the attack:}
-oversubscription persists at every clock budget level tested
-(Section~\ref{sec:eval-oversub}), from $+$16\,W at 30\% of maximum
-clock to $+$43\,W uncapped.
-(3)~\textbf{Mitigation must be workload-aware:}
-blanket clock capping may degrade compute-bound victims more than
-the attack; selective termination requires reliable attribution,
-which our blinded system achieves at 100\% accuracy
-(Section~\ref{sec:mit-attribution}).
-(4)~\textbf{Hardware isolation is not a complete defense:}
-even under MIG, co-located workloads share power delivery, so
-power monitoring should be a first-class GPU security component.
+\textbf{Implications for operators.}
+(1)~Power monitoring alone is insufficient---it cannot distinguish
+adversarial from benign heavy computation without process attribution.
+(2)~Software power caps do not neutralize the attack
+($+$16--43\,W at every clock budget).
+(3)~Mitigation must be workload-aware: blanket capping degrades
+compute-bound victims; selective termination needs reliable
+attribution (100\% accuracy, Section~\ref{sec:mit-attribution}).
+(4)~Even under MIG, shared power delivery means power monitoring
+should be a first-class GPU security component.
 
 
 % ===================================================================
@@ -1204,20 +1210,21 @@ our work extends the pattern to GPU availability.
 Project GAIA demonstrates that user-level GPU adversarial kernels
 elevate power by up to $1.83\times$ baseline (81.1\% TDP), with
 strongly workload-dependent impact ($+$92\% to $+$4\% latency).
+On LLM workloads, the attack inflates training latency by 85\%
+and inference latency by 78\%, while exhibiting asymmetric power
+signatures (training power \emph{decreases} due to DVFS contention).
 An 8-feature classifier detects attacks at 96.9\% accuracy
-(ROC-AUC = 0.9816); FFT and PCA analyses confirm that attack
-signatures are spectrally and dimensionally separable from
-legitimate workloads.  Software clock capping cannot neutralize the
-attack ($+$16--43\,W at every budget), and a matched-load
-experiment isolates $+$16.1\% excess degradation from power-domain
-interference.  Workload-aware mitigation via graceful termination
-achieves 41--43\% power recovery within 5--6\% of baseline latency,
-and blinded attribution via baseline-recovery scoring identifies
-the attacker at 100\% accuracy, completing an end-to-end
-attack--detect--attribute--mitigate pipeline with
-Prometheus-compatible monitoring.  Future work will extend to
-multi-GPU hardware with DCGM~\cite{dcgm2026} telemetry, MIG
-isolation, and adaptive adversarial strategies.
+(ROC-AUC = 0.9816); FFT and PCA analyses confirm spectral and
+dimensional separability.  Software clock capping cannot neutralize
+the attack ($+$16--43\,W at every budget).
+Workload-aware termination achieves 41--43\% power recovery, and
+blinded attribution identifies the attacker at 100\% accuracy.
+A proactive filler-kernel defense reduces attack power amplitude by
+37\% with negligible latency overhead, completing an end-to-end
+pipeline with Prometheus-compatible monitoring.
+Future work will extend to multi-GPU hardware with
+DCGM~\cite{dcgm2026} telemetry, MIG isolation, and adaptive
+adversarial strategies.
 
 % ===================================================================
 \section*{Acknowledgments}
@@ -1272,6 +1279,74 @@ isolation, and adaptive adversarial strategies.
 \label{app:pca}
 
 \input{sec_pca_detection}
+
+\section{Closed-Loop Mitigation Figure}
+\label{app:mitigation_fig}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=.9\textwidth]{fig4_t3_mitigation.pdf}
+\caption{Closed-loop mitigation (synthetic victim, 5 trials).
+  Top: aggregate power~(a) and latency~(b) per phase with 95\%
+  Student-$t$ CIs.  Bottom: single-trial timeline showing
+  power~(c) and victim latency~(d) with the detection flag at
+  4.28\,s.}
+\label{fig:t3}
+\end{figure*}
+
+\section{Blinded Attribution Figure}
+\label{app:attribution}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=.85\textwidth]{fig_blinded_attribution.pdf}
+\caption{Blinded attribution results (5 trials).
+  (a)~Mean power per phase: the attack \emph{reduces} power by
+  8.9\,W due to DVFS contention; the response phase shows reduced
+  power after all processes are killed.
+  (b)~Attribution accuracy: correct in all 5 trials.
+  (c)~Attribution latency per trial, consistent at 14.2\,s.}
+\label{fig:attribution}
+\end{figure*}
+
+\section{LLM Workload Details}
+\label{app:llm_workload}
+
+\input{figures/tab_llm_workload}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_llm_workload.pdf}
+  \caption{Attack impact on GPT-2 workloads (5 trials).
+    Training power \emph{decreases} under attack due to DVFS
+    contention, while inference power increases.  Both modes
+    suffer $>$78\% latency inflation and $>$44\% throughput loss.}
+  \label{fig:llm_workload}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.65\columnwidth]{figures/fig_llm_phase_breakdown.pdf}
+  \caption{GPT-2 training step phase breakdown (5 trials).
+    The optimizer phase absorbs most of the attack impact
+    ($+$112\%), consistent with memory-bandwidth contention
+    during gradient reduction.}
+  \label{fig:llm_phases}
+\end{figure}
+
+\section{Filler Kernel Defense Details}
+\label{app:filler_defense}
+
+\input{figures/tab_filler_defense}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_filler_defense.pdf}
+  \caption{Filler kernel defense: mean power ($\pm$1\,SD) across
+    5~trials.  A 25\% filler reduces the attacker's power
+    overhead by 37\% ($-$16.5\,W) with negligible latency cost.}
+  \label{fig:filler_defense}
+\end{figure}
 
 \section{Cross-Workload Mitigation Figures}
 \label{app:cnn_mitigation}

@@ -1,0 +1,17 @@
+\begin{table}[t]
+  \centering
+  \caption{LLM workload attack impact on Jetson AGX Thor (GPT-2, 124M params, 5 trials).}
+  \label{tab:llm_workload}
+  \small
+  \begin{tabular}{llrrr}
+    \toprule
+    Workload & Condition & Power (W) & Latency (ms) & Throughput (tok/s) \\
+    \midrule
+    Training & Baseline & 88.4 $\pm$ 0.5 & 102.0 $\pm$ 0.7 & 2512 $\pm$ 18 \\
+    Training & Attack & 77.0 $\pm$ 0.6 & 188.8 $\pm$ 0.7 & 1356 $\pm$ 5 \\
+    \midrule
+    Inference & Baseline & 59.2 $\pm$ 0.5 & 400.6 $\pm$ 2.4 & 320 $\pm$ 2 \\
+    Inference & Attack & 62.3 $\pm$ 0.8 & 713.6 $\pm$ 2.5 & 179 $\pm$ 1 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
