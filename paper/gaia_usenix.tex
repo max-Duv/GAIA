@@ -862,6 +862,25 @@ unauthorized high-power execution, this condition would be a true
 positive.  We state the labeling explicitly so the reader can
 reinterpret the confusion matrix.
 
+\textbf{Cross-workload generalization.}
+To test whether the detector generalizes to workload types absent
+from training, we train the eight-feature classifier \emph{only} on
+the matmul and CNN telemetry and evaluate it on the held-out GPT-2
+workloads (Section~\ref{sec:eval-llm}), which it never observed.
+The attack signature separates perfectly---ROC-AUC $=1.0$ on both
+LLM training and inference, with 0\% false positives on benign LLM
+runs---confirming that the power-domain signature is not a
+benchmark-specific artifact.  However, at the fixed decision
+threshold calibrated on high-power matmul/CNN attacks, recall drops
+to 60\% (training) and 0\% (inference): because the LLM-training
+attack \emph{lowers} power via DVFS contention
+(Section~\ref{sec:eval-llm}), its windows fall below a
+threshold tuned for power \emph{elevation}.  Recalibrating the
+threshold per workload class restores 100\% accuracy on both.  The
+signature therefore transfers across workloads, but the operating
+point must be workload-aware---the detection-side analogue of our
+workload-aware mitigation finding (Section~\ref{sec:mit-compare}).
+
 \subsection{Frequency-Domain and PCA Analysis}
 \label{sec:fft-pca-summary}
 
