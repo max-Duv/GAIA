@@ -1,0 +1,213 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus data source for GAIA GPU telemetry",
+      "type": "datasource",
+      "pluginId": "prometheus"
+    }
+  ],
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "GPU Module Rail Power (W)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "watt",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "gaia_gpu_power_watts",
+          "legendFormat": "Power",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        },
+        {
+          "expr": "gaia_mean_power_watts",
+          "legendFormat": "Detector Mean",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ]
+    },
+    {
+      "title": "GPU Temperature (°C)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "celsius",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 55 },
+              { "color": "red", "value": 75 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "gaia_gpu_temperature_celsius",
+          "legendFormat": "GPU Temp",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ]
+    },
+    {
+      "title": "GPU Clock Frequency (MHz)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "rotmhz"
+        }
+      },
+      "targets": [
+        {
+          "expr": "gaia_gpu_clock_mhz",
+          "legendFormat": "SM Clock",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ]
+    },
+    {
+      "title": "Module Rail Voltage (V)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "purple" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "volt",
+          "decimals": 4
+        }
+      },
+      "targets": [
+        {
+          "expr": "gaia_gpu_voltage_volts",
+          "legendFormat": "Rail Voltage",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ]
+    },
+    {
+      "title": "GPU & Memory Utilization (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "percent",
+          "max": 100, "min": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "gaia_gpu_utilization_percent",
+          "legendFormat": "GPU Compute",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        },
+        {
+          "expr": "gaia_gpu_memory_utilization_percent",
+          "legendFormat": "Memory",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ]
+    },
+    {
+      "title": "Anomaly Detection Status",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Normal", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "ANOMALY", "color": "red" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "gaia_anomaly_detected",
+          "legendFormat": "Anomaly",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ]
+    },
+    {
+      "title": "Current Readings",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Value" }, "properties": [{ "id": "decimals", "value": 2 }] }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "gaia_gpu_power_watts",
+          "legendFormat": "Power (W)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "instant": true
+        },
+        {
+          "expr": "gaia_gpu_temperature_celsius",
+          "legendFormat": "Temp (°C)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "instant": true
+        },
+        {
+          "expr": "gaia_gpu_clock_mhz",
+          "legendFormat": "Clock (MHz)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "instant": true
+        }
+      ],
+      "transformations": [
+        { "id": "merge", "options": {} }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["gpu", "security", "gaia", "power-monitoring"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Project GAIA: GPU Power Attack Monitor",
+  "uid": "gaia-gpu-power-attack-monitor",
+  "version": 1
+}
