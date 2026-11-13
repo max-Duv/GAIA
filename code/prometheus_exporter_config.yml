@@ -1,0 +1,26 @@
+# Prometheus scrape configuration for the GAIA GPU telemetry exporter.
+#
+# Add this job to your prometheus.yml under scrape_configs, or use
+# file_sd_configs to load it from a directory.
+#
+# The exporter runs on the Jetson AGX Thor and exposes metrics at
+# http://<jetson-ip>:9101/metrics.
+
+scrape_configs:
+  - job_name: "gaia_gpu_telemetry"
+    scrape_interval: 1s          # match the exporter's ~32 Hz sample rate
+    scrape_timeout: 1s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:9101"]
+        labels:
+          platform: "jetson_agx_thor"
+          gpu_arch: "sm_110"
+          experiment: "gaia"
+
+    # Keep the most relevant metrics; drop Go runtime internals that
+    # prometheus_client auto-generates.
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "^(go_|process_|python_).*"
+        action: drop
