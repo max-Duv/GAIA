@@ -1,0 +1,20 @@
+\begin{table}[t]
+  \centering
+  \caption{Hardware performance counters (nsys, 100\,Hz) per attack condition. Metrics from NVIDIA GB10B GPU on Jetson AGX Thor.}
+  \label{tab:hw_counters}
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    Condition & SMs Active (\%) & SM Issue (\%) & Warps (\%) & Clock (MHz) \\
+    \midrule
+    Baseline & 31.5 $\pm$ 36.7 & 27.1 $\pm$ 31.6 & 5.3 $\pm$ 6.1 & 336 $\pm$ 74 \\
+    Sustained & 56.0 $\pm$ 43.6 & 27.2 $\pm$ 26.0 & 9.4 $\pm$ 7.3 & 776 $\pm$ 607 \\
+    Cache & 96.5 $\pm$ 11.7 & 33.5 $\pm$ 21.3 & 62.7 $\pm$ 37.4 & 1575 $\pm$ 2 \\
+    Compute & 91.8 $\pm$ 15.2 & 44.5 $\pm$ 27.4 & 77.0 $\pm$ 28.1 & 1575 $\pm$ 3 \\
+    Pulsed & 96.2 $\pm$ 12.9 & 46.0 $\pm$ 19.0 & 37.7 $\pm$ 31.6 & 1575 $\pm$ 3 \\
+    Temp-sync & 76.5 $\pm$ 41.1 & 29.3 $\pm$ 23.4 & 25.5 $\pm$ 31.1 & 1492 $\pm$ 195 \\
+    Occupancy & 96.2 $\pm$ 12.9 & 43.5 $\pm$ 20.2 & 34.2 $\pm$ 32.6 & 1575 $\pm$ 3 \\
+    Legit high-power & 87.4 $\pm$ 28.4 & 72.3 $\pm$ 23.3 & 73.9 $\pm$ 34.6 & 1567 $\pm$ 24 \\
+    \bottomrule
+  \end{tabular}
+\end{table}

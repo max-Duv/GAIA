@@ -916,9 +916,12 @@ initial triage.
 The expanded eight features capture workload characteristics beyond
 the power envelope: GPU utilization rises from 24\% (victim alone) to
 98\% under attack, while the legitimate high-power workload reaches
-only 61\%.  Even so, memory bandwidth patterns and instruction-mix
-profiles remain unavailable through sysfs and could further improve
-discrimination.
+only 61\%.  Hardware performance counter profiling via Nsight Systems
+(Appendix~\ref{app:hw_counters}) confirms that attack primitives
+saturate SM scheduling slots ($>$91\% SMs Active) but sustain only
+27--46\% SM Issue throughput, versus 72\% for legitimate workloads---a
+``busy but unproductive'' signature that could further improve
+discrimination in a production deployment.
 
 \textbf{Spectral analysis and frequency-mechanism scoping.}
 The pulsed attack configures duty-cycle modulation at 10\,kHz,
@@ -1142,89 +1145,49 @@ requiring process identification.
 % ===================================================================
 
 \textbf{Platform and scale.}
-The Jetson AGX Thor shares its SoC power domain across GPU/CPU/IO;
-devfreq mitigation is Jetson-specific.  However, the attack
-primitives use only standard CUDA (PTX cache hints, INT32 ALU
-saturation, shared-memory occupancy pressure), which compiles
-unchanged for any \texttt{sm\_XX} target.  Discrete data-center GPUs
-have $3\text{--}8\times$ higher TDP (A100: 400\,W, H100: 700\,W,
-B200: 1000\,W), amplifying per-GPU power injection.
-Our Jetson experiments elevate power by 1.83$\times$ baseline
-(47\,W~$\to$~86\,W, a 39\,W delta).  At H100 scale, an equivalent
-1.83$\times$ factor would produce a $\sim$280\,W delta per GPU---and a
-single 8-GPU DGX H100 node would see $\sim$2.2\,kW of adversarial
-load, exceeding the 7--40\% provisioning margins that Fan et
-al.~\cite{fan2007} measured.
-The buffer sizes require adjustment (H100 L2 cache: 50\,MB vs.\
-Thor: $\sim$few\,MB) and detection thresholds scale linearly with
-TDP.  We designed the Jetson as a \emph{controlled testbed} with
-ground-truth INA3221 current-sense measurements; \texttt{nvidia-smi}
-and DCGM provide equivalent (if lower-fidelity) telemetry on
-discrete platforms.
-MPS/MIG partitioning~\cite{nvidia_mig2024} reduces
-cache-contention effects but not power-domain manipulation,
-because all MIG instances share a single physical power delivery
-network.  Recent work confirms that MIG does not
-fully isolate tenants even in cache and TLB
-domains~\cite{zhang2023tunnels,miao2024,gu2026}; the shared power
-rail is a strictly harder isolation problem, as voltage and current
-are physical quantities that cannot be virtualized.
+The attack primitives use only standard CUDA (PTX cache hints, INT32
+ALU saturation, shared-memory occupancy pressure), compiling unchanged
+for any \texttt{sm\_XX} target.  Discrete GPUs have
+$3\text{--}8\times$ higher TDP (A100: 400\,W, H100: 700\,W,
+B200: 1000\,W); our $1.83\times$ power factor at H100 scale would
+produce $\sim$280\,W per GPU---a single DGX H100 node would see
+$\sim$2.2\,kW of adversarial load, exceeding the 7--40\%
+provisioning margins of Fan et al.~\cite{fan2007}.
+MIG~\cite{nvidia_mig2024} reduces cache contention but not
+power-domain manipulation---all instances share a physical delivery
+network~\cite{zhang2023tunnels,miao2024,gu2026}.
 
-\textbf{Detection and attribution.}
+\textbf{Detection.}
 The 8-feature classifier (FPR 11.1\%) could improve with
-instruction-mix and memory-bandwidth features; the EMA detector is
-intentionally simple, with Kalman-filter scoring as a natural
-extension.  DCGM~\cite{dcgm2026} exposes richer counters on
-discrete platforms; our sysfs features exclude root-level profiling
-by design.
-Sequential elimination kills all candidates (2 innocent kills/trial);
-early-stopping could reduce collateral.
+instruction-mix features; hardware counter profiling
+(Appendix~\ref{app:hw_counters}) confirms attack primitives
+exhibit a ``busy but unproductive'' SM signature distinguishable
+from legitimate workloads.  DCGM~\cite{dcgm2026} exposes richer
+counters on discrete platforms.
 
 \textbf{Adaptive attackers.}
-An attacker aware of threshold detection could modulate power
-to stay below $\theta{=}60$\,W.  Our oversubscription sweep
-(Section~\ref{sec:oversubscription}) quantifies this trade-off:
-at the lowest clock budget (468\,MHz), the attack still elevates
-power by $+$16--24\,W above the clamped baseline, producing a
-$\sim$3$\sigma$ deviation detectable by the EMA filter.  Crucially,
-sub-threshold operation forces the attacker to sacrifice attack
-potency---victim latency degradation drops from $+$92\% at full
-power to below $+$15\% at sub-threshold levels, reducing the
-attack from a denial-of-service to a nuisance.
-A mimicry attacker could attempt to match a benign workload's
-power signature; however, the 8-feature ML classifier achieves
-0\% FPR on the $4096^2$ matmul hard negative precisely because
-power alone does not distinguish attack from benign---the feature
-vector (dI/dt, clock, temperature, utilization) captures
-microarchitectural behavior that adversarial kernels cannot easily
-replicate while simultaneously maintaining power elevation.
-An attacker who perfectly mimics the feature profile of a benign
-workload has, by definition, ceased to be adversarial.
+Sub-threshold modulation ($<\theta{=}60$\,W) forces the attacker to
+sacrifice potency: victim degradation drops from $+$92\% to
+$<$15\% (Section~\ref{sec:oversubscription}), reducing the attack
+to a nuisance.  Mimicry is defeated by the multi-feature classifier
+(0\% FPR on the $4096^2$ matmul hard negative): the feature vector
+captures microarchitectural behavior adversarial kernels cannot
+replicate while maintaining power elevation.
 
-\textbf{Monitoring integration.}
-We prototype a production monitoring path: a Prometheus exporter
-re-publishes sysfs telemetry (power, voltage, temperature, clock,
-utilization) as time-series metrics scraped at 1\,s intervals,
-visualized in a Grafana dashboard
-(Figure~\ref{fig:prometheus}, Appendix~\ref{app:prometheus}).
-On discrete platforms, the NVIDIA DCGM
-Exporter~\cite{dcgm2026} provides the same metric schema via
-\texttt{dcgmi dmon} at up to 10\,Hz, mapping directly onto our
-8-feature detector input.  The integration point is intentionally
-thin: the closed-loop mitigator (Section~\ref{sec:mitigation})
-consumes a $(power, clock, temp, util)$ tuple regardless of
-whether the backend is INA3221 sysfs, pynvml, or DCGM---making
-the pipeline portable across Jetson, workstation, and data-center
-deployments without code changes.
+\textbf{Monitoring.}
+A Prometheus exporter re-publishes sysfs telemetry as time-series
+metrics (Appendix~\ref{app:prometheus}).
+The pipeline consumes a $(power, clock, temp, util)$ tuple
+regardless of whether the backend is INA3221 sysfs, pynvml, or
+DCGM~\cite{dcgm2026}---portable across Jetson, workstation, and
+data-center deployments without code changes.
 
 \textbf{Implications for operators.}
-(1)~Power monitoring alone is insufficient---it cannot distinguish
-adversarial from benign heavy computation without process attribution.
-(2)~Software power caps do not neutralize the attack
-($+$16--43\,W at every clock budget).
+(1)~Power monitoring alone is insufficient without process attribution.
+(2)~Software power caps do not neutralize the attack ($+$16--43\,W at
+every budget).
 (3)~Mitigation must be workload-aware: blanket capping degrades
-compute-bound victims; selective termination needs reliable
-attribution (100\% accuracy, Section~\ref{sec:mit-attribution}).
+compute-bound victims.
 (4)~Even under MIG, shared power delivery means power monitoring
 should be a first-class GPU security component.
 
@@ -1254,71 +1217,38 @@ kernels disrupt real-time guarantees; Wang et al.~\cite{wang2025}
 demonstrated cache-eviction hint security implications.
 Naghibijouybari et
 al.~\cite{naghibijouybari2017,naghibijouybari2018,naghibijouybari2019}
-constructed GPU side and covert channels using performance counters.
-Nayak et al.~\cite{nayak2021} demonstrated TLB-based covert
-channels across GPU contexts.
-Dutta et al.~\cite{dutta2023} extended these attacks to multi-GPU
-systems over NVLink, and Zhang et al.~\cite{zhang2024beyond}
-demonstrated contention-based cross-GPU covert channels on the
-interconnect itself.  Under NVIDIA's Multi-Instance GPU (MIG)
-partitioning~\cite{nvidia_mig2024}, designed for multi-tenant
-isolation, Zhang et al.~\cite{zhang2023tunnels} reverse-engineered
-GPU TLBs to build a covert channel across MIG boundaries,
-Miao et al.~\cite{miao2024} identified leakage through DRAM
-frequency scaling and uncore engines, and Gu et al.~\cite{gu2026}
-exploited memory barriers to leak information across MIG cache
-partitions.  These results show that MIG mitigates compute-domain
-interference but does not eliminate cross-tenant leakage---and
-none of these works addresses the \emph{power domain}, which shares
-a physical delivery network regardless of MIG partitioning.
-Mittal et al.~\cite{mittal2018} surveyed GPU security but did not
-address power-domain attacks.
+constructed GPU side/covert channels; Dutta et
+al.~\cite{dutta2023} extended these over NVLink; and under MIG,
+Zhang et al.~\cite{zhang2023tunnels}, Miao et
+al.~\cite{miao2024}, and Gu et al.~\cite{gu2026} showed that
+MIG does not eliminate cross-tenant leakage in cache, TLB, and
+DRAM domains---none addresses the \emph{power domain}, which
+shares a physical delivery network regardless of partitioning.
 
 \textbf{GPU power-domain attacks (concurrent work).}
-Ji et al.~\cite{ji2026} (Bit2Watt, concurrent with our work)
-demonstrated that GPU workload modulation can inject harmonics
-into data center power delivery networks, potentially destabilizing
-grid infrastructure.  Their work focuses on the cyber-physical
-grid-attack path and electromagnetic interference; ours focuses on
-the \emph{data-center-internal} attack surface: victim workload
-degradation, detection with low-overhead telemetry, and closed-loop
-mitigation with adversary attribution.  The two papers are
-complementary: Bit2Watt characterizes the downstream grid risk;
-GAIA characterizes the upstream per-server attack primitives and
-defenses.
+Ji et al.~\cite{ji2026} (Bit2Watt) showed GPU workload modulation
+injects harmonics into power delivery networks.  Their work targets
+the downstream grid risk; ours characterizes the upstream per-server
+attack surface, detection, and mitigation.
 
 \textbf{AI power and hardware security.}
-Choukse et al.~\cite{choukse2025} showed synchronized training
-causes grid-level swings; Patel et al.~\cite{patel2024}
-characterized bursty LLM power phases; Stojkovic et
-al.~\cite{stojkovic2025} argued for rearchitecting the data center
-lifecycle around AI power demands; and Argerich et
-al.~\cite{wattgpu2025} modeled GPU inference power across
-architectures.
-Hong and Kim~\cite{hong2010} and Leng et al.~\cite{leng2013}
-(GPUWattch) modeled GPU power consumption at the architectural
-level, establishing the relationship between microarchitectural
-activity and power draw that our adversarial kernels exploit.
-Xiao et al.~\cite{xiao2018} (Gandiva) addressed GPU cluster
-scheduling but not power-domain security.
-Islam et al.~\cite{islam2024} surveyed hardware for trustworthy ML;
-Nazari et al.~\cite{nazari2023,nazari2024,nazari2026} addressed
-adversarial resource provisioning, transformer bit-flips, and
-Spectre mitigation; Rakin et al.~\cite{rakin2019} demonstrated
-bit-flip attacks on neural network weights; and Fan et
-al.~\cite{fan2026} demonstrated GPU cryptographic acceleration.
+Recent work highlights the growing power challenge:
+synchronized training causes grid-level swings~\cite{choukse2025},
+LLM serving exhibits bursty power phases~\cite{patel2024}, and
+GPU power modeling~\cite{hong2010,leng2013,wattgpu2025} establishes
+the microarchitectural--power relationship our attacks exploit.
+Broader hardware security work includes trustworthy ML
+surveys~\cite{islam2024}, adversarial resource
+provisioning~\cite{nazari2023}, and bit-flip
+attacks~\cite{rakin2019}; none addresses power-domain attacks.
 
 \textbf{Voltage/frequency fault injection and power side channels.}
-CLKSCREW~\cite{tang2017}, Plundervolt~\cite{murdock2020}, and
-VoltJockey~\cite{qiu2019} exploit DVFS for confidentiality attacks
-on CPUs.  Lipp et al.~\cite{lipp2021} (PLATYPUS) demonstrated
-software-based power side-channel attacks on x86 via the RAPL
-interface, leaking AES keys from SGX enclaves.  Our work extends
-the DVFS exploitation pattern to GPU \emph{availability} attacks
-and addresses a complementary threat: rather than extracting secrets
-through power observations, we show that adversarial power
-\emph{injection} degrades co-located workloads and evades
-simple defenses.
+CLKSCREW~\cite{tang2017}, Plundervolt~\cite{murdock2020},
+VoltJockey~\cite{qiu2019}, and PLATYPUS~\cite{lipp2021} exploit
+DVFS or power interfaces for \emph{confidentiality} attacks.
+Our work extends the DVFS exploitation pattern to GPU
+\emph{availability}: adversarial power \emph{injection} degrades
+co-located workloads rather than extracting secrets.
 
 
 % ===================================================================
@@ -1326,28 +1256,21 @@ simple defenses.
 \label{sec:conclusion}
 % ===================================================================
 
-Project GAIA demonstrates that user-level GPU adversarial kernels
-elevate power by up to $1.83\times$ baseline (81.1\% TDP), with
-strongly workload-dependent impact ($+$92\% to $+$4\% latency).
-On LLM workloads, the attack inflates training latency by 85\%
-and inference latency by 78\%, while exhibiting asymmetric power
-signatures (training power \emph{decreases} due to DVFS contention).
+Project GAIA demonstrates that user-level CUDA kernels elevate GPU
+power by $1.83\times$ baseline (81.1\% TDP), with workload-dependent
+impact ($+$92\% to $+$4\% latency); on LLMs, training latency
+rises 85\% while power \emph{decreases} due to DVFS contention.
 An 8-feature classifier detects attacks at 96.9\% accuracy
-(ROC-AUC = 0.9816); FFT and PCA analyses confirm spectral and
-dimensional separability.  Software clock capping cannot neutralize
-the attack ($+$16--43\,W at every budget).
-Workload-aware termination achieves 41--43\% power recovery, and
-blinded attribution identifies the attacker at 100\% accuracy.
-A proactive filler-kernel defense reduces attack power amplitude by
-37\% with negligible latency overhead, completing an end-to-end
-pipeline with Prometheus-compatible monitoring.
+(ROC-AUC\,=\,0.9816) and hardware counter profiling confirms a
+``busy but unproductive'' SM signature distinguishing attacks from
+legitimate workloads.  Software clock capping cannot neutralize the
+attack ($+$16--43\,W at every budget); workload-aware termination
+achieves 41--43\% power recovery with 100\% attribution accuracy,
+and a proactive filler defense reduces attack amplitude by 37\%.
 Future work will extend to discrete multi-GPU hardware with
-DCGM~\cite{dcgm2026} telemetry, MIG~\cite{nvidia_mig2024}
-isolation testing, and adaptive adversarial strategies.
-Integrating the per-server attack surface characterized here with
-the grid-level impact modeling of concurrent
-work~\cite{ji2026,soltan2018} is a natural next step toward
-quantifying the aggregate threat.
+DCGM~\cite{dcgm2026} telemetry and MIG~\cite{nvidia_mig2024}
+isolation testing, integrating with the grid-level impact modeling
+of concurrent work~\cite{ji2026,soltan2018}.
 
 % ===================================================================
 \section*{Acknowledgments}
@@ -1499,6 +1422,52 @@ quantifying the aggregate threat.
   95\% Student-$t$ CIs; individual trials are shown as light points.}
 \label{fig:sweep}
 \end{figure*}
+
+\section{Hardware Performance Counter Profiling}
+\label{app:hw_counters}
+
+To address the gap between sysfs-level telemetry and hardware-level
+profiling, we collect GPU performance counters using NVIDIA Nsight
+Systems (nsys 2025.3) at 100\,Hz during a full attack experiment
+(1~trial, all 9~conditions).  Table~\ref{tab:hw_counters} reports
+four key metrics.
+
+\input{figures/tab_hw_counters}
+
+The \textbf{SM Issue rate} provides the strongest discrimination
+between adversarial and legitimate high-power workloads.
+Legitimate computation sustains 72.3\% SM issue throughput
+(productive instructions per cycle), while attack primitives
+achieve only 27--46\%---they saturate SM scheduling slots
+(SMs Active $>$91\%) but waste warps on cache thrashing or
+occupancy flooding rather than productive computation.
+This ``busy but unproductive'' signature is architecturally
+fundamental: an adversary optimizing for power draw (memory
+bandwidth, warp occupancy) necessarily sacrifices instruction
+throughput.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_hw_counters.pdf}
+  \caption{Hardware performance counters per condition (nsys,
+    100\,Hz).  Attack conditions (red) saturate SM occupancy
+    but show lower SM Issue rates than the legitimate
+    high-power workload (amber), confirming the ``busy but
+    unproductive'' signature.}
+  \label{fig:hw_counters}
+\end{figure}
+
+Warps in Flight further distinguishes attack types:
+cache-eviction (63\%) and compute-saturation (77\%) keep
+many warps active but stalled on memory, while
+occupancy flooding (34\%) and pulsed attacks (38\%) cycle
+warps on and off.  These counter-level features are
+complementary to the sysfs-level power and utilization
+features used by the classifier
+(Section~\ref{sec:detect-ml}) and would enable a
+production deployment to distinguish ``power-expensive''
+from ``power-adversarial'' workloads with higher
+confidence than power-level features alone.
 
 \section{Prometheus Exporter Verification}
 \label{app:prometheus}
